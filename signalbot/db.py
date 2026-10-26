@@ -7,14 +7,17 @@ from .logic import Signal
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    src_msg_id  INTEGER UNIQUE,
+    src_chat    INTEGER NOT NULL,       -- каналы можно менять в боте, поэтому храним оба
+    src_msg_id  INTEGER NOT NULL,
+    dst_chat    INTEGER NOT NULL,
     dst_msg_id  INTEGER,
     data        TEXT NOT NULL,
     created_at  TEXT NOT NULL,          -- ISO, МСК
     status      TEXT NOT NULL DEFAULT 'open',  -- open / closed / cancelled
     tps_hit     TEXT NOT NULL DEFAULT '[]',
     be_moved    INTEGER NOT NULL DEFAULT 0,
-    cancel_due  TEXT                    -- когда отправить пост об отмене
+    cancel_due  TEXT,                   -- когда отправить пост об отмене
+    UNIQUE (src_chat, src_msg_id)
 );
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,22 +38,23 @@ class DB:
         self.conn.executescript(SCHEMA)
 
     # --- signals
-    def add_signal(self, src_id, dst_id, sig: Signal, created_at: str) -> int:
+    def add_signal(self, src_chat, src_id, dst_chat, dst_id, sig: Signal, created_at: str) -> int:
         cur = self.conn.execute(
-            "INSERT INTO signals (src_msg_id, dst_msg_id, data, created_at) VALUES (?,?,?,?)",
-            (src_id, dst_id, json.dumps(sig.to_dict()), created_at))
+            "INSERT INTO signals (src_chat, src_msg_id, dst_chat, dst_msg_id, data, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (src_chat, src_id, dst_chat, dst_id, json.dumps(sig.to_dict()), created_at))
         self.conn.commit()
         return cur.lastrowid
 
-    def by_src(self, src_id):
-        return self.conn.execute("SELECT * FROM signals WHERE src_msg_id=?", (src_id,)).fetchone()
+    def by_src(self, src_chat, src_id):
+        return self.conn.execute("SELECT * FROM signals WHERE src_chat=? AND src_msg_id=?",
+                                 (src_chat, src_id)).fetchone()
 
-    def latest_open(self):
-        return self.conn.execute(
-            "SELECT * FROM signals WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
-
-    def open_signals(self):
-        return self.conn.execute("SELECT * FROM signals WHERE status='open' ORDER BY id").fetchall()
+    def open_signals(self, src_chat=None):
+        if src_chat is None:
+            return self.conn.execute("SELECT * FROM signals WHERE status='open' ORDER BY id").fetchall()
+        return self.conn.execute("SELECT * FROM signals WHERE status='open' AND src_chat=? ORDER BY id",
+                                 (src_chat,)).fetchall()
 
     def created_on(self, day: str) -> int:
         return self.conn.execute(

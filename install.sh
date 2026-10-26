@@ -26,6 +26,6 @@ systemctl daemon-reload
 echo
 echo "Готово. Дальше:"
 echo "  1) nano $DIR/.env              — заполните API_ID, API_HASH, BOT_TOKEN"
-echo "  2) cd $DIR && venv/bin/python -m signalbot.login   — вход в аккаунт и список ID каналов"
-echo "  3) впишите SOURCE_CHANNEL и TARGET_CHANNEL в .env"
-echo "  4) systemctl enable --now signalbot && journalctl -u signalbot -f"
+echo "  2) cd $DIR && venv/bin/python -m signalbot.login   — вход в аккаунт-читатель"
+echo "  3) systemctl enable --now signalbot"
+echo "  4) в боте: /start → выберите каналы «откуда» и «куда»"
