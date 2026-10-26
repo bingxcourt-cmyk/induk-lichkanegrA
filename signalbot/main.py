@@ -13,7 +13,7 @@ from .botapi import BotAPI
 from .db import DB, row_signal, row_tps
 from .logic import (
     CANCEL_TEXT, classify_reply, fmt_r, format_be, format_signal, format_stats,
-    format_stop, format_tp_hit, parse_signal, ru_date, stop_result,
+    format_stop, format_tp_change, format_tp_hit, parse_signal, ru_date, stop_result,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -96,6 +96,13 @@ async def handle_new(src, msg):
         db.add_event(row["id"], "tp", sig.tp_r(idx), ts.date().isoformat(), ts.isoformat())
         db.update_signal(row["id"], tps_hit=json.dumps(hits),
                          status="closed" if len(hits) >= sig.n else "open")
+    elif kind[0] == "chg":
+        idx, price = kind[1], kind[2]
+        if idx > sig.n or idx in hits or sig.tps[idx - 1] == price:
+            return
+        sig.tps[idx - 1] = price  # R этого тейка дальше считается от новой цены
+        await bot.send(reply_chat(row), format_tp_change(idx, price), reply_to=row["dst_msg_id"])
+        db.update_signal(row["id"], data=json.dumps(sig.to_dict()))
     elif kind[0] == "be":
         if row["be_moved"]:
             return

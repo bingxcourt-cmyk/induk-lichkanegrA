@@ -39,7 +39,8 @@ BE = "Позицию переставляем в безубыточную цен
 
 async def run():
     for msg in [Msg(1, SIGNAL), Msg(2, "✅TP1  - 4014 XAUUSD, +400 point", 1), Msg(3, BE, 1),
-                Msg(4, "✅TP2  - 4010 XAUUSD, +800 points", 1), Msg(5, "🚨 Отстопило 4000", 1),
+                Msg(4, "✅TP2  - 4010 XAUUSD, +800 points", 1),
+                Msg(41, "🚨Измените TP3 4000", 1), Msg(42, "✅TP3  - 4000 XAUUSD, +1900 points", 1), Msg(5, "🚨 Отстопило 4000", 1),
                 Msg(6, SIGNAL.replace("SELL", "BUY").replace("4030", "4008")),  # будет отменён
                 Msg(7, "смотрите какой график"),
                 Msg(8, SIGNAL), Msg(9, "🚨 Отстопило 4030", 8)]:
@@ -57,5 +58,10 @@ async def run():
                       ("t.me/goldsignals", "@goldsignals"), ("привет", None)]:
         assert m.parse_chat_ref(ref) == want, (ref, m.parse_chat_ref(ref))
     print(m.panel_text())
+    from signalbot.logic import classify_reply
+    assert classify_reply("🚨Измените TP3 4106") == ("chg", 3, 4106)
+    assert classify_reply("🚨Измените TP3 - 4106")[0] == "chg"
+    assert ("-1001", "🚨 меняем TP3 на 4000") in [(str(c), t) for c, _, t in sent]
+    assert any(t == "🔥 TP3 взят - 4000 GOLD, +0.43R" for _, _, t in sent)  # 19/11=1.73 -> /4 = 0.43
 
 asyncio.run(run())

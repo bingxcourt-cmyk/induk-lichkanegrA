@@ -188,15 +188,19 @@ def format_signal(sig: Signal) -> str:
 
 # ------------------------------------------------- ответы на сигнал
 
+TP_CHANGE_RE = re.compile(r"(?:измени\w*|меняем|перенос\w*|move|change)\s+TP\s*(\d+)\s*(?:на|to)?\s*[:=\-–—]?\s*" + NUM, re.I)
 TP_HIT_RE = re.compile(r"\bTP\s*(\d+)\s*[-–—:]+\s*" + NUM, re.I)
 STOP_RE = re.compile(r"отстоп|стоп[\s-]*лосс\s+(?:сработал|выбило)|выбило\s+по\s+стоп|\bSL\s+hit\b|stopped\s+out", re.I)
 BE_RE = re.compile(r"безубыт|\bБУ\b|breakeven|break\s*even", re.I)
 
 
 def classify_reply(text: str):
-    """Возвращает ('tp', idx, price|None) / ('sl',) / ('be',) / None."""
+    """Возвращает ('tp', idx, price) / ('chg', idx, price) / ('sl',) / ('be',) / None."""
     if not text:
         return None
+    m = TP_CHANGE_RE.search(text)  # раньше тейка: "Измените TP3 - 4106" не должно стать "TP3 взят"
+    if m:
+        return ("chg", int(m.group(1)), D(m.group(2)))
     m = TP_HIT_RE.search(text)
     if m and not TP_DEF_RE.search(text.replace(m.group(0), "", 1)):
         return ("tp", int(m.group(1)), D(m.group(2)))
@@ -210,6 +214,10 @@ def classify_reply(text: str):
 def format_tp_hit(sig: Signal, idx: int) -> str:
     return (f"🔥 TP{idx} взят - {fmt_price(sig.tps[idx - 1])} "
             f"{display_symbol(sig.symbol)}, {fmt_r(sig.tp_r(idx))}")
+
+
+def format_tp_change(idx: int, price: Decimal) -> str:
+    return f"🚨 меняем TP{idx} на {fmt_price(price)}"
 
 
 def format_be(sig: Signal) -> str:
