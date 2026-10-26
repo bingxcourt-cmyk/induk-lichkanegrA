@@ -24,7 +24,7 @@ def _chat(v: str):
     return int(v) if v.lstrip("-").isdigit() else v
 
 
-API_ID = int(os.environ.get("API_ID", "0"))
+API_ID = int(os.environ.get("API_ID") or 0)
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SOURCE_CHANNEL = _chat(os.environ.get("SOURCE_CHANNEL", "0"))
