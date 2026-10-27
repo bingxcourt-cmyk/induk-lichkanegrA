@@ -104,11 +104,11 @@ class Signal:
                    D(d["sl"]), [D(t) for t in d["tps"]])
 
 
-HEADER_RE = re.compile(
-    r"\b(BUY|SELL)\b(?:\s+(?:LIMIT|STOP|NOW))?\s+#?([A-Z][A-Z0-9]{2,9})\b"
-    r"|#?\b([A-Z][A-Z0-9]{2,9})\b\s+(BUY|SELL)\b",
-    re.I,
-)
+ORDER_WORDS = r"(?:\s+(?:LIMIT|STOP|NOW|MARKET))*"
+# "SELL XAUUSD", "NFP BUY STOP LIMIT XAUUSD" — инструмент после BUY/SELL и типа ордера
+HEADER_RE = re.compile(r"\b(BUY|SELL)\b" + ORDER_WORDS + r"\s+#?([A-Z][A-Z0-9]{2,9})\b", re.I)
+# запасной вариант: "XAUUSD BUY"
+HEADER_REV_RE = re.compile(r"#?\b([A-Z][A-Z0-9]{2,9})\b\s+(BUY|SELL)\b", re.I)
 TP_DEF_RE = re.compile(r"(?:take\s*profit|\bTP)\s*(\d+)\s*[:=\-–—]?\s*" + NUM, re.I)
 SL_DEF_RE = re.compile(r"(?:stop\s*loss|\bSL\b)[^\d\n]*" + NUM, re.I)
 ENTRY_KW_RE = re.compile(r"📍|entry|вход|\bat\b|@", re.I)
@@ -118,13 +118,16 @@ def parse_signal(text: str):
     if not text:
         return None
     m = HEADER_RE.search(text)
-    if not m:
-        return None
-    if m.group(1):
+    if m:
         direction, symbol = m.group(1).upper(), m.group(2).upper()
+        head_re = HEADER_RE
     else:
-        symbol, direction = m.group(3).upper(), m.group(4).upper()
-    if symbol in ("TP", "SL"):
+        m = HEADER_REV_RE.search(text)
+        if not m:
+            return None
+        symbol, direction = m.group(1).upper(), m.group(2).upper()
+        head_re = HEADER_REV_RE
+    if symbol in ("TP", "SL", "LIMIT", "STOP", "NOW", "MARKET"):
         return None
 
     tps = {}
@@ -147,8 +150,8 @@ def parse_signal(text: str):
                 break
     if entry_nums is None:
         # Цена прямо в строке заголовка: "SELL XAUUSD 4018-4020"
-        head_line = next(l for l in lines if HEADER_RE.search(l))
-        rest = HEADER_RE.sub("", head_line)
+        head_line = next(l for l in lines if head_re.search(l))
+        rest = head_re.sub("", head_line)
         nums = re.findall(NUM, rest)
         if nums:
             entry_nums = nums[:2]
@@ -160,6 +163,8 @@ def parse_signal(text: str):
                  [tps[k] for k in sorted(tps)])
     if sig.entry == sig.sl:
         return None
+    # направление решают уровни: стоп выше входа — шорт (бывает "BUY STOP" с уровнями продажи)
+    sig.direction = "SELL" if sig.sl > sig.entry else "BUY"
     return sig
 
 
