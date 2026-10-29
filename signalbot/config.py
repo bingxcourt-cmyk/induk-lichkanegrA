@@ -34,6 +34,18 @@ TZ = os.environ.get("TZ_NAME", "Europe/Moscow")
 STATS_TIME = os.environ.get("STATS_TIME", "23:40")
 CANCEL_DELAY_MIN = int(os.environ.get("CANCEL_DELAY_MIN", "10"))
 
+# Источник 2: перевод реплаев через Claude API
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
+
+# Источник 2: цена FxPro через cTrader Open API
+CTRADER_CLIENT_ID = os.environ.get("CTRADER_CLIENT_ID", "")
+CTRADER_CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET", "")
+CTRADER_ACCESS_TOKEN = os.environ.get("CTRADER_ACCESS_TOKEN", "")
+CTRADER_ACCOUNT_ID = os.environ.get("CTRADER_ACCOUNT_ID", "")
+CTRADER_LIVE = os.environ.get("CTRADER_LIVE", "1") not in ("0", "false", "no", "")
+FXPRO_SYMBOL = os.environ.get("FXPRO_SYMBOL", "XAUUSD")
+
 SESSION = str(BASE / "data" / "user")
 DB_PATH = str(BASE / "data" / "bot.db")
 

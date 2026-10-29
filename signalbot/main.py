@@ -1,4 +1,8 @@
-"""Копировщик сигналов: читает закрытый канал с аккаунта и публикует в свой канал через бота."""
+"""Копировщик сигналов: читает закрытые каналы с аккаунта и публикует в свои каналы через бота.
+
+Источник 1 — основная логика (этот файл), источник 2 — source2.py, источник 3 — заглушка.
+Каналы для каждого источника выбираются в панели бота (/panel).
+"""
 import asyncio
 import json
 import logging
@@ -8,9 +12,13 @@ from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient, events
 
-from . import config
+from . import config, prices
 from .botapi import BotAPI
 from .db import DB, row_signal, row_tps
+from .panel import Panel
+from .settings import Settings
+from .source2 import Source2
+from .translate import Translator
 from .logic import (
     CANCEL_TEXT, classify_reply, fmt_r, format_be, format_signal, format_stats,
     format_stop, format_tp_hit, parse_signal, ru_date, stop_result,
@@ -22,11 +30,18 @@ log = logging.getLogger("signalbot")
 TZ = ZoneInfo(config.TZ)
 db = DB(config.DB_PATH)
 bot = BotAPI(config.BOT_TOKEN)
+settings = Settings(db)
 lock = asyncio.Lock()
+panel = None    # создаются в main(): нужен аккаунт-читатель
+source2 = None
 
 
 def now() -> datetime:
     return datetime.now(TZ)
+
+
+def target1():
+    return settings.target(1) or config.TARGET_CHANNEL
 
 
 # ------------------------------------------------------ сообщения источника
@@ -51,7 +66,7 @@ async def handle_new(msg):
     if sig:
         if db.by_src(msg.id):
             return
-        dst = await bot.send(config.TARGET_CHANNEL, format_signal(sig))
+        dst = await bot.send(target1(), format_signal(sig))
         db.add_signal(msg.id, dst, sig, now().isoformat())
         log.info("сигнал %s %s -> %s", sig.direction, sig.symbol, dst)
         return
@@ -70,18 +85,18 @@ async def handle_new(msg):
         if idx > sig.n or idx in hits:
             return
         hits.append(idx)
-        await bot.send(config.TARGET_CHANNEL, format_tp_hit(sig, idx), reply_to=row["dst_msg_id"])
+        await bot.send(target1(), format_tp_hit(sig, idx), reply_to=row["dst_msg_id"])
         db.add_event(row["id"], "tp", sig.tp_r(idx), ts.date().isoformat(), ts.isoformat())
         db.update_signal(row["id"], tps_hit=json.dumps(hits),
                          status="closed" if len(hits) >= sig.n else "open")
     elif kind[0] == "be":
         if row["be_moved"]:
             return
-        await bot.send(config.TARGET_CHANNEL, format_be(sig), reply_to=row["dst_msg_id"])
+        await bot.send(target1(), format_be(sig), reply_to=row["dst_msg_id"])
         db.update_signal(row["id"], be_moved=1)
     elif kind[0] == "sl":
         r = stop_result(sig, len(hits), bool(row["be_moved"]))
-        await bot.send(config.TARGET_CHANNEL, format_stop(sig, len(hits), bool(row["be_moved"])),
+        await bot.send(target1(), format_stop(sig, len(hits), bool(row["be_moved"])),
                        reply_to=row["dst_msg_id"])
         db.add_event(row["id"], "sl", r, ts.date().isoformat(), ts.isoformat())
         db.update_signal(row["id"], status="closed")
@@ -100,7 +115,7 @@ async def handle_edit(msg):
         return
     if row["status"] != "open" or row_tps(row):
         return
-    await bot.edit(config.TARGET_CHANNEL, row["dst_msg_id"], format_signal(sig))
+    await bot.edit(target1(), row["dst_msg_id"], format_signal(sig))
     db.update_signal(row["id"], data=json.dumps(sig.to_dict()))
     log.info("сигнал #%s отредактирован", row["id"])
 
@@ -132,7 +147,7 @@ def month_bounds(y: int, m: int):
 async def daily_job(today: date):
     res = db.results(today.isoformat(), today.isoformat())
     if res or db.created_on(today.isoformat()):
-        await bot.send(config.TARGET_CHANNEL,
+        await bot.send(target1(),
                        format_stats(f"торговая сессия {ru_date(today)}:", res, "итог дня"))
 
     # Сигналы без единого ответа (тейк/стоп) к концу дня считаются отменёнными
@@ -167,7 +182,7 @@ async def scheduler():
                 async with lock:
                     await daily_job(t.date())
             for row in db.due_cancels(t.isoformat()):
-                await bot.send(config.TARGET_CHANNEL, CANCEL_TEXT, reply_to=row["dst_msg_id"])
+                await bot.send(target1(), CANCEL_TEXT, reply_to=row["dst_msg_id"])
                 db.update_signal(row["id"], cancel_due=None)
         except Exception:
             log.exception("ошибка планировщика")
@@ -182,7 +197,8 @@ HELP = (
     "/week — с понедельника по сегодня\n"
     "/month — текущий месяц (или /month 09.2026)\n"
     "/period 01.10.2026 26.10.2026 — за выбранный период\n"
-    "/open — открытые сигналы"
+    "/open — открытые сигналы\n"
+    "/panel — панель: каналы источников и приёмников"
 )
 
 
@@ -230,11 +246,21 @@ async def admin_loop():
             for upd in await bot.updates(offset):
                 offset = upd["update_id"] + 1
                 db.set("upd_offset", offset)
+                cb = upd.get("callback_query")
+                if cb:
+                    if cb.get("from", {}).get("id") == config.ADMIN_ID and panel:
+                        await panel.on_callback(cb)
+                    continue
                 msg = upd.get("message") or {}
                 if msg.get("from", {}).get("id") != config.ADMIN_ID or msg.get("chat", {}).get("type") != "private":
                     continue
                 text = msg.get("text", "")
+                if panel and await panel.on_text(msg["chat"]["id"], text):
+                    continue
                 if not text.startswith("/"):
+                    continue
+                if panel and text.split()[0].split("@")[0].lower() in ("/panel", "/start"):
+                    await panel.open(msg["chat"]["id"])
                     continue
                 try:
                     answer = admin_command(text)
@@ -248,16 +274,40 @@ async def admin_loop():
 
 # ------------------------------------------------------------------ запуск
 
+async def seed_source1(user):
+    """Первый запуск после обновления: переносим каналы источника 1 из .env в панель."""
+    from telethon import utils
+    if settings.source(1) is None and config.SOURCE_CHANNEL:
+        ent = await user.get_entity(config.SOURCE_CHANNEL)
+        settings.set_chat(1, "source", utils.get_peer_id(ent), getattr(ent, "title", str(ent.id)))
+    if settings.target(1) is None and config.TARGET_CHANNEL:
+        settings.set_chat(1, "target", config.TARGET_CHANNEL, str(config.TARGET_CHANNEL))
+
+
 async def main():
+    global panel, source2
     user = TelegramClient(config.SESSION, config.API_ID, config.API_HASH)
     await user.connect()
     if not await user.is_user_authorized():
         raise SystemExit("Аккаунт не авторизован: запустите  python -m signalbot.login")
     await user.get_dialogs()  # прогреваем кэш, чтобы видеть закрытые каналы по ID
-    source = await user.get_entity(config.SOURCE_CHANNEL)
-    log.info("слушаю канал: %s", getattr(source, "title", source))
+    await seed_source1(user)
 
-    @user.on(events.NewMessage(chats=source))
+    async def list_chats():
+        return [(d.id, d.name) async for d in user.iter_dialogs() if d.is_channel or d.is_group]
+
+    fx = prices.from_config(config)
+    await fx.start()
+    panel = Panel(bot, db, settings, list_chats)
+    source2 = Source2(bot, db, settings, fx, Translator(config.ANTHROPIC_API_KEY, config.CLAUDE_MODEL),
+                      now, config.ADMIN_ID)
+    for n in (1, 2, 3):
+        log.info("источник %s: %s -> %s", n, settings.name(n, "source"), settings.name(n, "target"))
+
+    def from_source(n):
+        return lambda e: settings.source(n) == e.chat_id
+
+    @user.on(events.NewMessage(func=from_source(1)))
     async def on_new(event):
         async with lock:
             try:
@@ -265,7 +315,17 @@ async def main():
             except Exception:
                 log.exception("ошибка обработки сообщения %s", event.message.id)
 
-    @user.on(events.MessageEdited(chats=source))
+    @user.on(events.NewMessage(func=from_source(2)))
+    async def on_new2(event):
+        async with lock:
+            try:
+                await source2.handle(event.message)
+            except Exception:
+                log.exception("источник 2: ошибка обработки сообщения %s", event.message.id)
+
+    # Источник 3 — заглушка: канал выбирается в панели, правила появятся позже.
+
+    @user.on(events.MessageEdited(func=from_source(1)))
     async def on_edit(event):
         async with lock:
             try:

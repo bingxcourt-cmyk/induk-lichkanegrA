@@ -14,7 +14,7 @@ async def main():
     async for d in client.iter_dialogs():
         if d.is_channel or d.is_group:
             print(f"  {d.id:>16}  {d.name}")
-    print("\nВпишите нужные ID в .env (SOURCE_CHANNEL и TARGET_CHANNEL)")
+    print("\nКаналы для источников выбираются в боте командой /panel")
     await client.disconnect()
 
 

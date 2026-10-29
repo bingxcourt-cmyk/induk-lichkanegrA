@@ -25,6 +25,19 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS s2_signals (     -- источник 2 (Forex Bulls)
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_msg_id  INTEGER UNIQUE,             -- сигнал или «BUY XAUUSD AGAIN NOW»
+    dst_msg_id  INTEGER,
+    direction   TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+    entry       TEXT,                       -- цена FxPro на момент отправки, NULL — не было цены
+    sl          TEXT NOT NULL,
+    tp          TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',  -- open / profit / stopped
+    child_id    INTEGER,                    -- перезаход после стопа
+    created_at  TEXT NOT NULL
+);
 """
 
 
@@ -85,6 +98,31 @@ class DB:
             if row["kind"] == "sl":
                 v["sl"] = True
         return res
+
+    # --- источник 2
+    def s2_add(self, src_id, dst_id, direction, symbol, entry, sl, tp, created_at) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO s2_signals (src_msg_id, dst_msg_id, direction, symbol, entry, sl, tp, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (src_id, dst_id, direction, symbol, None if entry is None else str(entry),
+             str(sl), str(tp), created_at))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def s2_by_src(self, src_id):
+        return self.conn.execute("SELECT * FROM s2_signals WHERE src_msg_id=?", (src_id,)).fetchone()
+
+    def s2_latest(self, src_id):
+        """Сигнал по id исходного сообщения; после перезахода — его актуальная версия."""
+        row = self.s2_by_src(src_id)
+        while row and row["child_id"]:
+            row = self.conn.execute("SELECT * FROM s2_signals WHERE id=?", (row["child_id"],)).fetchone()
+        return row
+
+    def s2_update(self, sid, **fields):
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.conn.execute(f"UPDATE s2_signals SET {cols} WHERE id=?", (*fields.values(), sid))
+        self.conn.commit()
 
     # --- kv
     def get(self, k, default=None):

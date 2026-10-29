@@ -33,23 +33,30 @@ class BotAPI:
             raise RuntimeError(f"{method}: {data.get('description')}")
         raise RuntimeError(f"{method}: не удалось после повторов")
 
-    async def send(self, chat_id, text: str, reply_to: int = None) -> int:
-        params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    async def send(self, chat_id, text: str, reply_to: int = None, html: bool = False,
+                   markup: dict = None) -> int:
+        params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True,
+                  "parse_mode": "HTML" if html else None, "reply_markup": markup}
         if reply_to:
             params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
         msg = await self._call("sendMessage", **params)
         return msg["message_id"]
 
-    async def edit(self, chat_id, message_id: int, text: str):
+    async def edit(self, chat_id, message_id: int, text: str, html: bool = False, markup: dict = None):
         try:
-            await self._call("editMessageText", chat_id=chat_id, message_id=message_id, text=text)
+            await self._call("editMessageText", chat_id=chat_id, message_id=message_id, text=text,
+                             parse_mode="HTML" if html else None, reply_markup=markup,
+                             disable_web_page_preview=True)
         except RuntimeError as e:
             if "not modified" not in str(e):
                 raise
 
+    async def answer_callback(self, callback_id: str, text: str = None):
+        await self._call("answerCallbackQuery", callback_query_id=callback_id, text=text)
+
     async def updates(self, offset: int):
         return await self._call("getUpdates", offset=offset, timeout=50,
-                                allowed_updates=["message"])
+                                allowed_updates=["message", "callback_query"])
 
     async def close(self):
         if self.session:
