@@ -29,9 +29,16 @@
 * прочие реплаи на сигнал переводятся на русский через Claude API (`ANTHROPIC_API_KEY`)
 * медиа, ссылки, приветствия и всё, что не сигнал и не реплай на сигнал, не копируется
 
-Цена берётся у FxPro через cTrader Open API: нужен счёт FxPro cTrader (можно демо) и приложение
-на openapi.ctrader.com → `CTRADER_*` в `.env`. Для BUY берётся ask, для SELL — bid. Пока доступа нет,
-бот пишет «Вход по рынку» и предупреждает админа; цены других брокеров не подставляются.
+Цена берётся у FxPro через cTrader Open API (для BUY — ask, для SELL — bid). Настройка один раз:
+
+1. Счёт FxPro cTrader (можно демо), привязанный к вашему cTrader ID.
+2. openapi.ctrader.com → войти тем же cTrader ID → Applications → Add new app. После одобрения
+   скопировать Client ID и Secret в `.env` (`CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`).
+3. `venv/bin/python -m signalbot.ctrader_setup` — вставить токены из Playground (scope «accounts»),
+   выбрать счёт FxPro. Скрипт проверит котировку золота и запишет остальное в `.env`.
+4. `systemctl restart signalbot`. Токен бот обновляет сам (свежий лежит в `data/ctrader_token.json`).
+
+Пока доступа нет, бот пишет «Вход по рынку» и предупреждает админа; цены других брокеров не подставляются.
 
 ## Установка на сервер
 
