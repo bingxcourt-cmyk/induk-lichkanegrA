@@ -33,6 +33,8 @@ def test_classify():
     assert classify_reply("Close off profits") == ("close",)
     assert classify_reply("hold the buys") == ("other",)
     assert classify_reply("join us https://t.me/xxx") is None
+    for promo in ("GOT PAID TODAY IN THE VIP", "Join VIP now", "DM me for premium", "VIP members got 300 pips"):
+        assert classify_reply(promo) is None, promo
     assert classify_reply("🔥🔥🔥") is None
     assert classify_reply("") is None
 

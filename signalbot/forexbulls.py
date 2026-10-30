@@ -17,6 +17,10 @@ TP_RE = re.compile(r"\bTP\d?\b\s*[:=\-]?\s*" + NUM, re.I)
 AGAIN_RE = re.compile(r"\b(BUY|SELL)\s+#?([A-Z]{3,10})\s+AGAIN\b", re.I)
 CLOSE_RE = re.compile(r"\bclos(?:e|ing)\b[^\n]*\bprofits?\b", re.I)
 LINK_RE = re.compile(r"https?://|www\.|t\.me/|@\w{4,}", re.I)
+# реклама VIP и хвастовство результатами: «GOT PAID TODAY IN THE VIP», «join VIP», «DM me»
+PROMO_RE = re.compile(r"\bvip\b|\bgot\s+paid\b|\bjoin\b|\bsubscri|\bdm\b|\binbox\b|\bmessage\s+me\b"
+                      r"|\bpromo\b|\bdiscount\b|\bslots?\b|\bmembers?\b|\bpremium\b|\bmentorship\b"
+                      r"|\btestimonial|\breview|\bwhatsapp\b|\bcontact\b", re.I)
 SKIP = "SKIP"
 
 
@@ -42,7 +46,7 @@ def parse_signal(text: str):
 def classify_reply(text: str):
     """Реплай на сигнал: ('again', BUY|SELL) / ('close',) / ('other',) / None (отбросить)."""
     text = (text or "").strip()
-    if not text or LINK_RE.search(text):
+    if not text or LINK_RE.search(text) or PROMO_RE.search(text):
         return None
     m = AGAIN_RE.search(text)
     if m:
@@ -97,8 +101,12 @@ def format_close(entry, sl: Decimal, price) -> str:
 STOP_TEXT = "🚨 сработал стоп-лосс. -1% к депозиту"
 
 TRANSLATE_PROMPT = (
-    "Ты переводишь сообщения трейдера из VIP-канала с сигналами по золоту (XAUUSD). "
-    "Сообщение — ответ на открытую позицию. Переведи его на русский разговорным языком "
-    "трейдера, коротко, без пояснений и кавычек; тикеры и числа оставь как есть. "
-    f"Если сообщение не касается позиции (приветствие, реклама, болтовня), ответь ровно {SKIP}."
+    "Ты переводишь сообщения трейдера из канала с сигналами по золоту (XAUUSD). "
+    "Сообщение — ответ на открытую позицию. Пропускай только то, что говорит подписчику, "
+    "что делать с этой сделкой или что с ней происходит: держать, закрыть часть, перенести стоп, "
+    "добавиться, тейк или стоп близко, цена идёт к цели и т.п. Такое переведи на русский "
+    "разговорным языком трейдера, коротко, без пояснений и кавычек; тикеры и числа оставь как есть. "
+    "Всё остальное — реклама VIP-канала или платной подписки, хвастовство прибылью и отзывы "
+    "(«got paid today», «another win for VIP»), приветствия, мотивация, болтовня — "
+    f"ответь ровно {SKIP}. Если сомневаешься, тоже {SKIP}."
 )
