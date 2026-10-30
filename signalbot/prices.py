@@ -181,10 +181,48 @@ class CTraderPrices:
                 pinger.cancel()
 
 
+class OandaPrices:
+    """Цена OANDA через v20 REST API (токен из личного кабинета, подойдёт демо-счёт).
+
+    Это НЕ цена FxPro: включается, только если задан OANDA_TOKEN, и пока не настроен cTrader.
+    """
+
+    def __init__(self, token, live=False, instrument="XAU_USD"):
+        host = "api-fxtrade.oanda.com" if live else "api-fxpractice.oanda.com"
+        self.base = f"https://{host}/v3"
+        self.headers = {"Authorization": f"Bearer {token}"}
+        self.instrument = instrument
+        self.account = None
+
+    async def start(self):
+        log.info("цена берётся у OANDA (%s), не у FxPro", self.instrument)
+
+    async def get(self, symbol: str, direction: str) -> Decimal:
+        """Цена входа: ask для BUY, bid для SELL."""
+        if symbol.upper() not in ("XAUUSD", "GOLD"):
+            raise PriceUnavailable(f"котировка {symbol} не настроена")
+        try:
+            async with aiohttp.ClientSession(headers=self.headers,
+                                             timeout=aiohttp.ClientTimeout(total=15)) as http:
+                if self.account is None:
+                    async with http.get(f"{self.base}/accounts") as r:
+                        self.account = (await r.json())["accounts"][0]["id"]
+                async with http.get(f"{self.base}/accounts/{self.account}/pricing",
+                                    params={"instruments": self.instrument}) as r:
+                    data = await r.json()
+            p = data["prices"][0]
+            side = p["asks"] if direction == "BUY" else p["bids"]
+            return Decimal(side[0]["price"])
+        except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, IndexError) as e:
+            raise PriceUnavailable(f"OANDA: {e!r}")
+
+
 def from_config(config):
     if config.CTRADER_CLIENT_ID and config.CTRADER_ACCESS_TOKEN and config.CTRADER_ACCOUNT_ID:
         return CTraderPrices(config.CTRADER_CLIENT_ID, config.CTRADER_CLIENT_SECRET,
                              config.CTRADER_ACCESS_TOKEN, config.CTRADER_REFRESH_TOKEN,
                              config.CTRADER_ACCOUNT_ID, config.FXPRO_SYMBOL, config.CTRADER_LIVE,
                              config.CTRADER_TOKEN_FILE)
+    if config.OANDA_TOKEN:
+        return OandaPrices(config.OANDA_TOKEN, config.OANDA_LIVE)
     return NoPrices()

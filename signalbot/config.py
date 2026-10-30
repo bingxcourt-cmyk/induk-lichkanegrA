@@ -47,6 +47,10 @@ CTRADER_ACCOUNT_ID = os.environ.get("CTRADER_ACCOUNT_ID", "")
 CTRADER_LIVE = os.environ.get("CTRADER_LIVE", "1") not in ("0", "false", "no", "")
 FXPRO_SYMBOL = os.environ.get("FXPRO_SYMBOL", "XAUUSD")
 
+# Временно, пока не одобрен cTrader: цена OANDA (v20 API). Если cTrader настроен, OANDA не используется.
+OANDA_TOKEN = os.environ.get("OANDA_TOKEN", "")
+OANDA_LIVE = os.environ.get("OANDA_LIVE", "0") not in ("0", "false", "no", "")
+
 SESSION = str(BASE / "data" / "user")
 DB_PATH = str(BASE / "data" / "bot.db")
 CTRADER_TOKEN_FILE = str(BASE / "data" / "ctrader_token.json")  # обновлённые токены cTrader

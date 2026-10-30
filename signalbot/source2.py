@@ -23,10 +23,10 @@ class Source2:
         try:
             return await self.prices.get(symbol, direction)
         except PriceUnavailable as e:
-            log.warning("цена FxPro недоступна: %s", e)
+            log.warning("цена недоступна: %s", e)
             if self.admin_id:
                 try:
-                    await self.bot.send(self.admin_id, f"⚠️ Источник 2: нет цены FxPro ({e}). "
+                    await self.bot.send(self.admin_id, f"⚠️ Источник 2: нет цены ({e}). "
                                                        "Пост отправлен без цены.")
                 except RuntimeError:
                     pass
