@@ -563,20 +563,26 @@ async def on_callback(cq):
         await bot.edit(chat, mid, *screen)
 
 
+async def send_screen(chat, screen):
+    """screen = (текст, клавиатура); клавиатуру передаём именно как markup, а не reply_to."""
+    text, kb = screen
+    return await bot.send(chat, text, markup=kb)
+
+
 async def on_admin_message(msg):
     chat, text = msg["chat"]["id"], msg.get("text", "")
     if pending.get(chat, ("",))[0] == "hdr" and text and (not text.startswith("/") or text.strip() == "/clear"):
         rid = int(pending.pop(chat)[1])
         header = "" if text.strip() == "/clear" else text.strip()
         db.update_route(rid, header=header)
-        return await bot.send(chat, *route_screen(rid, "✅ Заголовок сохранён" if header else "✅ Заголовок убран"))
+        return await send_screen(chat, route_screen(rid, "✅ Заголовок сохранён" if header else "✅ Заголовок убран"))
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
         pending.pop(chat, None)
         if cmd in ("/start", "/settings", "/menu"):
             if cmd == "/start":
                 await set_commands()
-            return await bot.send(chat, *panel())
+            return await send_screen(chat, panel())
         try:
             answer = admin_command(text)
         except (ValueError, IndexError):
@@ -584,7 +590,7 @@ async def on_admin_message(msg):
         return await bot.send(chat, answer)
 
     if chat not in pending:
-        return await bot.send(chat, *panel())
+        return await send_screen(chat, panel())
     kind, rid = pending[chat]
     fwd = (msg.get("forward_origin") or {}).get("chat") or msg.get("forward_from_chat")
     try:
@@ -593,7 +599,7 @@ async def on_admin_message(msg):
         refresh_sources()
     except Refuse as e:
         return await bot.send(chat, str(e))
-    await bot.send(chat, *screen)
+    await send_screen(chat, screen)
 
 
 async def set_commands():
