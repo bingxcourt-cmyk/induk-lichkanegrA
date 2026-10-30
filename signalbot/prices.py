@@ -217,6 +217,36 @@ class OandaPrices:
             raise PriceUnavailable(f"OANDA: {e!r}")
 
 
+class TwelveDataPrices:
+    """Цена золота у Twelve Data (общая рыночная, не конкретного брокера).
+
+    Это НЕ цена FxPro: включается, только если задан TWELVEDATA_KEY, и пока не настроен cTrader.
+    Отдаёт одну цену без bid/ask, поэтому для BUY и SELL она одинаковая.
+    """
+    URL = "https://api.twelvedata.com/price"
+
+    def __init__(self, key, symbol="XAU/USD"):
+        self.headers = {"Authorization": f"apikey {key}"}
+        self.symbol = symbol
+
+    async def start(self):
+        log.info("цена берётся у Twelve Data (%s), не у FxPro", self.symbol)
+
+    async def get(self, symbol: str, direction: str) -> Decimal:
+        if symbol.upper() not in ("XAUUSD", "GOLD"):
+            raise PriceUnavailable(f"котировка {symbol} не настроена")
+        try:
+            async with aiohttp.ClientSession(headers=self.headers,
+                                             timeout=aiohttp.ClientTimeout(total=15)) as http:
+                async with http.get(self.URL, params={"symbol": self.symbol}) as r:
+                    data = await r.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            raise PriceUnavailable(f"Twelve Data: {e!r}")
+        if "price" not in data:
+            raise PriceUnavailable(f"Twelve Data: {data.get('message') or data}")
+        return Decimal(data["price"])
+
+
 def from_config(config):
     if config.CTRADER_CLIENT_ID and config.CTRADER_ACCESS_TOKEN and config.CTRADER_ACCOUNT_ID:
         return CTraderPrices(config.CTRADER_CLIENT_ID, config.CTRADER_CLIENT_SECRET,
@@ -225,4 +255,6 @@ def from_config(config):
                              config.CTRADER_TOKEN_FILE)
     if config.OANDA_TOKEN:
         return OandaPrices(config.OANDA_TOKEN, config.OANDA_LIVE)
+    if config.TWELVEDATA_KEY:
+        return TwelveDataPrices(config.TWELVEDATA_KEY)
     return NoPrices()

@@ -36,7 +36,8 @@
 3. `venv/bin/python -m signalbot.ctrader_setup` — токены из Sandbox (scope «Account info»), выбор счёта FxPro.
 4. `systemctl restart signalbot`. Токен бот обновляет сам (`data/ctrader_token.json`).
 
-Пока cTrader не настроен, цена берётся у OANDA, если задан `OANDA_TOKEN`; иначе бот пишет «Вход по рынку»
+Пока cTrader не настроен, цена берётся у OANDA (`OANDA_TOKEN`) или Twelve Data (`TWELVEDATA_KEY`);
+иначе бот пишет «Вход по рынку»
 и предупреждает админа.
 
 ## Установка на сервер

@@ -50,6 +50,8 @@ FXPRO_SYMBOL = os.environ.get("FXPRO_SYMBOL", "XAUUSD")
 # Временно, пока не одобрен cTrader: цена OANDA (v20 API). Если cTrader настроен, OANDA не используется.
 OANDA_TOKEN = os.environ.get("OANDA_TOKEN", "")
 OANDA_LIVE = os.environ.get("OANDA_LIVE", "0") not in ("0", "false", "no", "")
+# или Twelve Data (twelvedata.com, бесплатный ключ): общая рыночная цена золота, не брокерская
+TWELVEDATA_KEY = os.environ.get("TWELVEDATA_KEY", "")
 
 SESSION = str(BASE / "data" / "user")
 DB_PATH = str(BASE / "data" / "bot.db")
