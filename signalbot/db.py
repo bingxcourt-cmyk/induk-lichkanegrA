@@ -38,7 +38,29 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS s2_signals (     -- сигналы перенаправлений с правилами «Forex Bulls»
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    route_id    INTEGER NOT NULL,
+    src_msg_id  INTEGER NOT NULL,           -- сигнал или «BUY XAUUSD AGAIN NOW»
+    dst_chat    INTEGER NOT NULL,
+    dst_msg_id  INTEGER,
+    direction   TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+    entry       TEXT,                       -- цена на момент отправки, NULL — цены не было
+    sl          TEXT NOT NULL,
+    tp          TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',  -- open / profit / stopped / archived
+    child_id    INTEGER,                    -- перезаход после стопа
+    created_at  TEXT NOT NULL,
+    UNIQUE (route_id, src_msg_id)
+);
 """
+
+RULES = {
+    "standard": "Стандарт (источник 1)",
+    "forexbulls": "Forex Bulls (источник 2)",
+    "stub": "Заглушка (источник 3)",
+}
 
 
 class DB:
@@ -47,6 +69,16 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self._migrate_single_channel()
         self.conn.executescript(SCHEMA)
+        self._migrate_rules()
+
+    def _migrate_rules(self):
+        """У перенаправления появились свои правила и строка-заголовок."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(routes)")}
+        if "rules" not in cols:
+            self.conn.execute("ALTER TABLE routes ADD COLUMN rules TEXT NOT NULL DEFAULT 'standard'")
+        if "header" not in cols:
+            self.conn.execute("ALTER TABLE routes ADD COLUMN header TEXT NOT NULL DEFAULT ''")
+        self.conn.commit()
 
     def _migrate_single_channel(self):
         """Старая схема (один источник и один канал в kv) -> перенаправление №1."""
@@ -94,6 +126,7 @@ class DB:
         """Перенаправление больше не ведём: открытые сигналы не отслеживаются, статистика уходит."""
         self.conn.execute("UPDATE routes SET active=0 WHERE id=?", (rid,))
         self.conn.execute("UPDATE signals SET status='archived' WHERE route_id=? AND status='open'", (rid,))
+        self.conn.execute("UPDATE s2_signals SET status='archived' WHERE route_id=? AND status='open'", (rid,))
         self.conn.commit()
 
     # --- signals
@@ -150,6 +183,37 @@ class DB:
             if row["kind"] == "sl":
                 v["sl"] = True
         return res
+
+    # --- сигналы «Forex Bulls»
+    def s2_add(self, route_id, src_id, dst_chat, dst_id, direction, symbol, entry, sl, tp,
+               created_at) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO s2_signals (route_id, src_msg_id, dst_chat, dst_msg_id, direction, symbol,"
+            " entry, sl, tp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (route_id, src_id, dst_chat, dst_id, direction, symbol,
+             None if entry is None else str(entry), str(sl), str(tp), created_at))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def s2_by_src(self, route_id, src_id):
+        return self.conn.execute("SELECT * FROM s2_signals WHERE route_id=? AND src_msg_id=?",
+                                 (route_id, src_id)).fetchone()
+
+    def s2_latest(self, route_id, src_id):
+        """Сигнал по id исходного сообщения; после перезахода — его актуальная версия."""
+        row = self.s2_by_src(route_id, src_id)
+        while row and row["child_id"]:
+            row = self.conn.execute("SELECT * FROM s2_signals WHERE id=?", (row["child_id"],)).fetchone()
+        return row
+
+    def s2_open(self, route_id):
+        return self.conn.execute("SELECT * FROM s2_signals WHERE route_id=? AND status='open' ORDER BY id",
+                                 (route_id,)).fetchall()
+
+    def s2_update(self, sid, **fields):
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.conn.execute(f"UPDATE s2_signals SET {cols} WHERE id=?", (*fields.values(), sid))
+        self.conn.commit()
 
     # --- kv
     def get(self, k, default=None):

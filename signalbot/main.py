@@ -1,4 +1,8 @@
-"""Копировщик сигналов: читает закрытые каналы с аккаунта и публикует в свои каналы через бота."""
+"""Копировщик сигналов: читает закрытые каналы с аккаунта и публикует в свои каналы через бота.
+
+У каждого перенаправления свои правила: «Стандарт» (этот файл), «Forex Bulls» (source2.py)
+или «Заглушка» (сообщения пока не копируются).
+"""
 import asyncio
 import json
 import logging
@@ -9,13 +13,15 @@ from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient, events, utils
 
-from . import config
+from . import config, prices
 from .botapi import BotAPI
-from .db import DB, row_signal, row_tps
+from .db import DB, RULES, row_signal, row_tps
 from .logic import (
     CANCEL_TEXT, classify_reply, fmt_r, format_be, format_signal, format_stats,
     format_stop, format_tp_change, format_tp_hit, parse_signal, ru_date, stop_result, summarize,
 )
+from .source2 import Source2
+from .translate import Translator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("signalbot")
@@ -26,6 +32,7 @@ bot = BotAPI(config.BOT_TOKEN)
 lock = asyncio.Lock()
 user = None        # TelegramClient аккаунта-читателя (None, если не авторизован)
 sources = set()    # ID каналов-источников активных перенаправлений
+forexbulls = None  # правила «Forex Bulls» (Source2), создаются в main()
 
 
 def now() -> datetime:
@@ -68,6 +75,12 @@ async def handle_new(src, msg):
 
 
 async def process(route, msg):
+    if route["rules"] == "forexbulls":
+        if forexbulls is not None:
+            await forexbulls.handle(route, msg)
+        return
+    if route["rules"] != "standard":
+        return  # «Заглушка»: правила появятся позже
     text = msg.message or ""
     sig = parse_signal(text)
     if sig:
@@ -123,7 +136,7 @@ async def handle_edit(src, msg):
     if not sig:
         return
     for route in db.routes():
-        if route["source"] != src:
+        if route["source"] != src or route["rules"] != "standard":
             continue
         row = db.by_src(route["id"], msg.id)
         if row is None:
@@ -301,8 +314,11 @@ def panel(note: str = ""):
     for i, r in enumerate(routes, 1):
         res = db.results(today, today, r["id"])
         total = sum((v["r"] for v in res.values()), Decimal(0))
-        lines.append(f"{i}. {route_name(r)}\n    сегодня: {len(res)} поз., {fmt_r(total, trim=True)}"
-                     f" · открыто {len(db.open_signals(r['id']))}")
+        if r["rules"] == "standard":
+            lines.append(f"{i}. {route_name(r)}\n    сегодня: {len(res)} поз., {fmt_r(total, trim=True)}"
+                         f" · открыто {len(db.open_signals(r['id']))}")
+        else:
+            lines.append(f"{i}. {route_name(r)}\n    правила: {RULES[r['rules']]}")
     if not routes:
         lines.append("Пока нет ни одного — нажмите «➕ Добавить».")
     if user is None:
@@ -324,16 +340,43 @@ def route_screen(rid: int, note: str = ""):
         f"🔀 {route_name(r)}", "",
         f"📥 Откуда: {r['source_title']}\n      ID {r['source']}",
         f"📤 Куда: {r['target_title']}\n      ID {r['target']}", "",
-        f"📊 С {start:%d.%m.%Y}: ✅ {profit} · 🚨 {stops} · итог {fmt_r(total, trim=True)}",
-        f"Открытых сигналов: {len(db.open_signals(rid))}",
+        f"📐 Правила: {RULES[r['rules']]}",
     ]
-    kb = keyboard([
+    if r["rules"] == "standard":
+        lines += [f"📊 С {start:%d.%m.%Y}: ✅ {profit} · 🚨 {stops} · итог {fmt_r(total, trim=True)}",
+                  f"Открытых сигналов: {len(db.open_signals(rid))}"]
+    elif r["rules"] == "forexbulls":
+        lines += [f"🏷 Заголовок: {r['header'] or '— (без заголовка)'}",
+                  f"Открытых сигналов: {len(db.s2_open(rid))}"]
+    rows = [
         [("📥 Сменить источник", f"pick:src:{rid}")],
         [("📤 Сменить канал публикации", f"pick:dst:{rid}")],
-        [("🗑 Удалить", f"del:{rid}")],
-        [("« Назад", "panel")],
-    ])
-    return "\n".join(lines), kb
+        [("📐 Правила", f"rules:{rid}")],
+    ]
+    if r["rules"] == "forexbulls":
+        rows.append([("🏷 Заголовок сигнала", f"hdr:{rid}")])
+    rows += [[("🗑 Удалить", f"del:{rid}")], [("« Назад", "panel")]]
+    return "\n".join(lines), keyboard(rows)
+
+
+def rules_screen(rid: int):
+    r = db.route(rid)
+    if r is None:
+        return panel("Это перенаправление уже удалено")
+    rows = [[(("✅ " if key == r["rules"] else "") + title, f"setrules:{rid}:{key}")]
+            for key, title in RULES.items()]
+    rows.append([("« Назад", f"r:{rid}")])
+    return f"📐 Правила для «{route_name(r)}»:", keyboard(rows)
+
+
+def header_prompt(chat, rid: int):
+    r = db.route(rid)
+    if r is None:
+        return panel("Это перенаправление уже удалено")
+    pending[chat] = ("hdr", str(rid))
+    return (f"🏷 Пришлите текст строки-заголовка для сигналов «{route_name(r)}».\n\n"
+            f"Сейчас: {r['header'] or '— (без заголовка)'}\n\n/clear — убрать заголовок",
+            keyboard([[("« Назад", f"r:{rid}")]]))
 
 
 async def pick_screen(chat, kind: str, rid: str):
@@ -458,6 +501,7 @@ async def apply_channel(chat, kind: str, rid: str, ref):
         # новый источник = новое перенаправление: статистика с нуля, старые сигналы не отслеживаем
         db.close_route(route["id"])
         new = db.add_route(cid, title, route["target"], route["target_title"], now().isoformat())
+        db.update_route(new, rules=route["rules"], header=route["header"])
         log.info("перенаправление #%s: источник %s → %s (#%s)", route["id"], route["source_title"], title, new)
         return route_screen(new, "✅ Источник заменён, статистика обнулена")
     check_pair(route["source"], cid, skip_rid=route["id"])
@@ -490,6 +534,17 @@ async def on_callback(cq):
             refresh_sources()
         except Refuse as e:
             return await bot.send(chat, str(e))
+    elif data.startswith("rules:"):
+        pending.pop(chat, None)
+        screen = rules_screen(int(data[6:]))
+    elif data.startswith("setrules:"):
+        _, rid, key = data.split(":")
+        if db.route(int(rid)) and key in RULES:
+            db.update_route(int(rid), rules=key)
+            log.info("перенаправление #%s: правила %s", rid, key)
+        screen = route_screen(int(rid), f"✅ Правила: {RULES.get(key, key)}")
+    elif data.startswith("hdr:"):
+        screen = header_prompt(chat, int(data[4:]))
     elif data.startswith("del:"):
         r = db.route(int(data[4:]))
         if r:
@@ -510,6 +565,11 @@ async def on_callback(cq):
 
 async def on_admin_message(msg):
     chat, text = msg["chat"]["id"], msg.get("text", "")
+    if pending.get(chat, ("",))[0] == "hdr" and text and (not text.startswith("/") or text.strip() == "/clear"):
+        rid = int(pending.pop(chat)[1])
+        header = "" if text.strip() == "/clear" else text.strip()
+        db.update_route(rid, header=header)
+        return await bot.send(chat, *route_screen(rid, "✅ Заголовок сохранён" if header else "✅ Заголовок убран"))
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
         pending.pop(chat, None)
@@ -581,7 +641,7 @@ async def import_env_channels():
 
 
 async def main():
-    global user
+    global user, forexbulls
     client = TelegramClient(config.SESSION, config.API_ID, config.API_HASH)
     await client.connect()
     if await client.is_user_authorized():
@@ -591,6 +651,10 @@ async def main():
         log.error("аккаунт не авторизован: запустите  python -m signalbot.login  (бот-панель работает)")
     await import_env_channels()
     refresh_sources()
+    fx = prices.from_config(config)
+    await fx.start()
+    forexbulls = Source2(bot, db, fx, Translator(config.ANTHROPIC_API_KEY, config.CLAUDE_MODEL),
+                         now, config.ADMIN_ID)
     for r in db.routes():
         log.info("перенаправление #%s: %s", r["id"], route_name(r))
 

@@ -13,6 +13,32 @@
 * каналы «откуда» и «куда» выбираются в боте: `/settings` → кнопки со списком ваших каналов (или прислать ID / @username / ссылку / переслать сообщение из канала), без перезапуска
 * команды админа боту: `/settings`, `/today`, `/week`, `/month [09.2026]`, `/period 01.10.2026 26.10.2026`, `/open`
 
+## Правила перенаправления
+
+У каждого перенаправления в `/settings` → «📐 Правила» свои правила:
+
+* **Стандарт (источник 1)** — всё, что описано выше
+* **Forex Bulls (источник 2)** — канал Forex Bulls Vip Trades:
+  * `BUY XAUUSD / SL 4019.957 / TP 4068.642` → заголовок («🏷 Заголовок сигнала» в боте), `#GOLD LONG`,
+    `Вход <текущая цена>`, `SL: 4019.96`, `Takeprofit: 4068.64` и строка со ссылкой на бота
+  * реплай `Close off profits` → `закрываем сделку в профит по текущей цене. +X% к депозиту`,
+    X = 1% × |цена − вход| / |вход − SL|
+  * реплай `BUY XAUUSD AGAIN NOW` → на старый сигнал «сработал стоп-лосс», затем новый сигнал
+    с входом по текущей цене и прежними SL/TP
+  * прочие реплаи на сигнал переводятся на русский через Claude API (`ANTHROPIC_API_KEY`)
+  * медиа, ссылки, приветствия и всё, что не сигнал и не реплай на сигнал, не копируется
+* **Заглушка (источник 3)** — пока ничего не копирует
+
+Цена для Forex Bulls (для BUY — ask, для SELL — bid) берётся у FxPro через cTrader Open API:
+
+1. Счёт FxPro cTrader (можно демо), привязанный к вашему cTrader ID.
+2. openapi.ctrader.com → Applications → Add new app. После одобрения Client ID и Secret — в `.env`.
+3. `venv/bin/python -m signalbot.ctrader_setup` — токены из Sandbox (scope «Account info»), выбор счёта FxPro.
+4. `systemctl restart signalbot`. Токен бот обновляет сам (`data/ctrader_token.json`).
+
+Пока cTrader не настроен, цена берётся у OANDA, если задан `OANDA_TOKEN`; иначе бот пишет «Вход по рынку»
+и предупреждает админа.
+
 ## Установка на сервер
 
 ```bash
@@ -25,4 +51,4 @@ systemctl stop signalbot; venv/bin/python -m signalbot.login; systemctl enable -
 ```
 Каналы выберите в боте командой /settings. Админ должен один раз нажать /start в боте, чтобы бот мог писать в личку.
 
-Проверка логики без Telegram: `python3 tests/test_flow.py`
+Проверка логики без Telegram: `python3 tests/test_flow.py` и `python3 tests/test_source2.py`

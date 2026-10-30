@@ -36,9 +36,10 @@ class BotAPI:
     async def call(self, method: str, **params):
         return await self._call(method, **params)
 
-    async def send(self, chat_id, text: str, reply_to: int = None, markup: dict = None) -> int:
+    async def send(self, chat_id, text: str, reply_to: int = None, markup: dict = None,
+                   html: bool = False) -> int:
         params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True,
-                  "reply_markup": markup}
+                  "reply_markup": markup, "parse_mode": "HTML" if html else None}
         if reply_to:
             params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
         msg = await self._call("sendMessage", **params)
