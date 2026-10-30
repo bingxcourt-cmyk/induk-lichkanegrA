@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from .forexbulls import (classify_reply, digits, fmt_level, format_close, format_signal, format_stop,
-                         format_tp, parse_signal, symbol_of)
-from .logic import D
+                         format_tp, parse_signal, profit_pct, result_pct, symbol_of)
+from .logic import D, round2
 from .prices import PriceUnavailable
 
 log = logging.getLogger("forexbulls")
@@ -42,6 +42,19 @@ class Source2:
                              self.now().isoformat())
         log.info("сигнал %s %s вход %s SL %s TP %s -> %s", direction, symbol, entry, sl, tp, dst)
         return sid
+
+    def _close(self, row, status, result=None):
+        """Сделка закрыта: статус и итог в % депозита (None — посчитать не из чего) для статистики."""
+        if result is not None:
+            result = round2(result) + 0  # + 0 убирает «-0.00»
+        self.db.s2_update(row["id"], status=status, closed_day=self.now().date().isoformat(),
+                          result=None if result is None else str(result))
+
+    @staticmethod
+    def _stop_result(row, entry, sl0, sl):
+        if entry is None or sl == sl0 or entry == sl0:
+            return Decimal(-1)
+        return result_pct(row["direction"], entry, sl0, sl)
 
     def _thread(self, route, msg):
         """Сигнал, к ветке которого относится сообщение (реплай на сигнал или на реплай к нему)."""
@@ -94,7 +107,8 @@ class Source2:
                 return
             price = await self._price(row["symbol"], row["direction"]) if entry is not None else None
             await self.bot.send(chat, format_close(entry, sl0, price), reply_to=reply_to)
-            self.db.s2_update(row["id"], status="profit")
+            ok = entry is not None and price is not None and entry != sl0
+            self._close(row, "profit", profit_pct(entry, sl0, price) if ok else None)
         elif act == "tp":
             if not is_open:
                 return
@@ -102,18 +116,21 @@ class Source2:
             if price is None and entry is not None:
                 price = await self._price(row["symbol"], row["direction"])
             await self.bot.send(chat, format_tp(entry, sl0, price), reply_to=reply_to)
-            self.db.s2_update(row["id"], status="profit")
+            ok = entry is not None and price is not None and entry != sl0
+            self._close(row, "profit", profit_pct(entry, sl0, price) if ok else None)
         elif act == "sl":
             if not is_open:
                 return
             await self.bot.send(chat, format_stop(row["direction"], entry, sl0, sl), reply_to=reply_to)
-            self.db.s2_update(row["id"], status="stopped")
+            self._close(row, "stopped", self._stop_result(row, entry, sl0, sl))
         elif act == "closeoff":
             if not is_open:
                 return
             ru = await self.translator.translate(text)
             await self.bot.send(chat, ru or "закрываем сделку по текущей цене.", reply_to=reply_to)
-            self.db.s2_update(row["id"], status="closed")
+            price = await self._price(row["symbol"], row["direction"]) if entry is not None else None
+            ok = entry is not None and price is not None and entry != sl0
+            self._close(row, "closed", result_pct(row["direction"], entry, sl0, price) if ok else None)
         elif act == "move":
             if not is_open:
                 return
@@ -146,7 +163,11 @@ class Source2:
                 new_id = await self._post_signal(route, msg.id, row["symbol"], direction, new_sl, new_tp,
                                                  reply_to=reply_to)
                 status = "reentered" if is_open else row["status"]
-            self.db.s2_update(row["id"], child_id=new_id, status=status)
+            self.db.s2_update(row["id"], child_id=new_id)
+            if status == "stopped":
+                self._close(row, "stopped", self._stop_result(row, entry, sl0, sl))
+            elif status != row["status"]:
+                self.db.s2_update(row["id"], status=status)
         else:
             ru = await self.translator.translate(text)
             if ru:

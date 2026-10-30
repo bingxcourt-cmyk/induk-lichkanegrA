@@ -197,6 +197,9 @@ def test_threads_and_updates():
         await s2.handle(route, Msg(9, "Take profit hit 🔥", 8))                   # тейк открытый -> по цене, 108
         await s2.handle(route, Msg(10, "Close profits"))                          # открытых нет -> тишина
     asyncio.run(run())
+    # статистика в % депозита: +1.5, 0 (стоп в безубыток), +2 (тейк перезахода)
+    res = db.results("2000-01-01", "2100-01-01", route["id"])
+    assert sorted(str(v["r"]) for v in res.values()) == ["0.00", "1.50", "2.00"], res
     texts = [(r, t.split("\n")[0]) for _, r, t in bot.sent]
     assert texts == [
         (None, "#GOLD LONG"),

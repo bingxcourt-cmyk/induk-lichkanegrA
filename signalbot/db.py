@@ -84,8 +84,12 @@ class DB:
             self.conn.execute("ALTER TABLE routes ADD COLUMN rules TEXT NOT NULL DEFAULT 'standard'")
         if "header" not in cols:
             self.conn.execute("ALTER TABLE routes ADD COLUMN header TEXT NOT NULL DEFAULT ''")
-        if "sl0" not in {r[1] for r in self.conn.execute("PRAGMA table_info(s2_signals)")}:
+        s2cols = {r[1] for r in self.conn.execute("PRAGMA table_info(s2_signals)")}
+        if "sl0" not in s2cols:
             self.conn.execute("ALTER TABLE s2_signals ADD COLUMN sl0 TEXT")  # стоп из сигнала, для расчёта 1R
+        if "result" not in s2cols:  # итог сделки в % депозита и день закрытия — для статистики
+            self.conn.execute("ALTER TABLE s2_signals ADD COLUMN result TEXT")
+            self.conn.execute("ALTER TABLE s2_signals ADD COLUMN closed_day TEXT")
         self.conn.commit()
 
     def _migrate_single_channel(self):
@@ -156,7 +160,15 @@ class DB:
         return self.conn.execute("SELECT * FROM signals WHERE status='open' AND route_id=? ORDER BY id",
                                  (route_id,)).fetchall()
 
+    def _rules(self, route_id):
+        row = self.conn.execute("SELECT rules FROM routes WHERE id=?", (route_id,)).fetchone()
+        return row["rules"] if row else "standard"
+
     def created_on(self, day: str, route_id) -> int:
+        if self._rules(route_id) == "forexbulls":
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM s2_signals WHERE substr(created_at,1,10)=? AND route_id=?",
+                (day, route_id)).fetchone()[0]
         return self.conn.execute(
             "SELECT COUNT(*) FROM signals WHERE substr(created_at,1,10)=? AND route_id=?",
             (day, route_id)).fetchone()[0]
@@ -179,7 +191,14 @@ class DB:
         self.conn.commit()
 
     def results(self, day_from: str, day_to: str, route_id) -> dict:
-        """Итог по каждой позиции перенаправления за период (по дате события)."""
+        """Итог по каждой позиции перенаправления за период (по дате события).
+
+        Для «Forex Bulls» итог в % депозита (1% = 1R), по дню закрытия сделки."""
+        if self._rules(route_id) == "forexbulls":
+            rows = self.conn.execute(
+                "SELECT id, result, status FROM s2_signals WHERE route_id=? AND result IS NOT NULL"
+                " AND closed_day BETWEEN ? AND ?", (route_id, day_from, day_to)).fetchall()
+            return {r["id"]: {"r": Decimal(r["result"]), "sl": r["status"] == "stopped"} for r in rows}
         rows = self.conn.execute(
             "SELECT e.signal_id, e.kind, e.r FROM events e JOIN signals s ON s.id = e.signal_id"
             " WHERE e.day BETWEEN ? AND ? AND s.route_id=?",

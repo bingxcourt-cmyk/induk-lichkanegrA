@@ -17,8 +17,8 @@ from . import config, prices
 from .botapi import BotAPI
 from .db import DB, RULES, row_signal, row_tps
 from .logic import (
-    CANCEL_TEXT, ENTER_TEXT, REENTRY_TEXT, RISK_TEXT, classify_reply, fmt_r, format_be, format_signal,
-    format_stats, format_stop, format_tp_change, format_tp_hit, format_tp_update, parse_signal, ru_date,
+    CANCEL_TEXT, ENTER_TEXT, REENTRY_TEXT, RISK_TEXT, classify_reply, format_be, format_signal,
+    fmt_total, format_stats, format_stop, format_tp_change, format_tp_hit, format_tp_update, parse_signal, ru_date,
     stop_result, summarize,
 )
 from .source2 import Source2
@@ -43,6 +43,11 @@ def now() -> datetime:
 def refresh_sources():
     sources.clear()
     sources.update(r["source"] for r in db.routes())
+
+
+def unit(route) -> str:
+    """Статистика «Forex Bulls» — в % депозита, стандартная — в R."""
+    return "%" if route["rules"] == "forexbulls" else "R"
 
 
 def route_name(route) -> str:
@@ -189,14 +194,14 @@ async def handle_edit(src, msg):
 
 def report(route, day_from: date, day_to: date, title: str, label="итог") -> str:
     res = db.results(day_from.isoformat(), day_to.isoformat(), route["id"])
-    text = format_stats(title, res, label)
+    text = format_stats(title, res, label, unit(route))
     if day_from != day_to:
         lines, d = [], day_from
         while d <= day_to:
             day_res = db.results(d.isoformat(), d.isoformat(), route["id"])
             if day_res:
                 total = sum(v["r"] for v in day_res.values())
-                lines.append(f"{d:%d.%m} — {len(day_res)} поз., {fmt_r(total, trim=True)}")
+                lines.append(f"{d:%d.%m} — {len(day_res)} поз., {fmt_total(total, unit(route))}")
             d += timedelta(days=1)
         if lines:
             text += "\n\n📅 по дням:\n" + "\n".join(lines)
@@ -224,7 +229,7 @@ async def daily_job(today: date):
         if res or db.created_on(today.isoformat(), route["id"]):
             try:
                 await bot.send(route["target"],
-                               format_stats(f"торговая сессия {ru_date(today)}:", res, "итог дня"))
+                               format_stats(f"торговая сессия {ru_date(today)}:", res, "итог дня", unit(route)))
             except RuntimeError as e:
                 log.error("итоги дня не отправлены (%s): %s", route_name(route), e)
 
@@ -349,11 +354,12 @@ def panel(note: str = ""):
     for i, r in enumerate(routes, 1):
         res = db.results(today, today, r["id"])
         total = sum((v["r"] for v in res.values()), Decimal(0))
-        if r["rules"] == "standard":
-            lines.append(f"{i}. {route_name(r)}\n    сегодня: {len(res)} поз., {fmt_r(total, trim=True)}"
-                         f" · открыто {len(db.open_signals(r['id']))}")
-        else:
+        if r["rules"] == "stub":
             lines.append(f"{i}. {route_name(r)}\n    правила: {RULES[r['rules']]}")
+        else:
+            opened = db.open_signals(r["id"]) if r["rules"] == "standard" else db.s2_open(r["id"])
+            lines.append(f"{i}. {route_name(r)}\n    сегодня: {len(res)} поз., {fmt_total(total, unit(r))}"
+                         f" · открыто {len(opened)}")
     if not routes:
         lines.append("Пока нет ни одного — нажмите «➕ Добавить».")
     if user is None:
@@ -378,10 +384,11 @@ def route_screen(rid: int, note: str = ""):
         f"📐 Правила: {RULES[r['rules']]}",
     ]
     if r["rules"] == "standard":
-        lines += [f"📊 С {start:%d.%m.%Y}: ✅ {profit} · 🚨 {stops} · итог {fmt_r(total, trim=True)}",
+        lines += [f"📊 С {start:%d.%m.%Y}: ✅ {profit} · 🚨 {stops} · итог {fmt_total(total)}",
                   f"Открытых сигналов: {len(db.open_signals(rid))}"]
     elif r["rules"] == "forexbulls":
-        lines += [f"🏷 Заголовок: {r['header'] or '— (без заголовка)'}",
+        lines += [f"📊 С {start:%d.%m.%Y}: ✅ {profit} · 🚨 {stops} · итог {fmt_total(total, '%')}",
+                  f"🏷 Заголовок: {r['header'] or '— (без заголовка)'}",
                   f"Открытых сигналов: {len(db.s2_open(rid))}"]
     rows = [
         [("📥 Сменить источник", f"pick:src:{rid}")],

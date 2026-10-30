@@ -299,10 +299,15 @@ def summarize(results: dict) -> tuple:
     return profit, stops, be, total
 
 
-def format_stats(title: str, results: dict, total_label: str = "итог дня") -> str:
+def fmt_total(x: Decimal, unit: str = "R") -> str:
+    """Итог в R или в % депозита (Forex Bulls): +1.25R / +1.25%."""
+    return fmt_r(x, trim=True)[:-1] + unit
+
+
+def format_stats(title: str, results: dict, total_label: str = "итог дня", unit: str = "R") -> str:
     profit, stops, be, total = summarize(results)
     lines = [title, "", f"✅профитных позиций - {profit}", "", f"🚨стоп-лоссов - {stops}", ""]
     if be:
         lines += [f"🤝в безубыток - {be}", ""]
-    lines.append(f"🏁{total_label}: {fmt_r(total, trim=True)}")
+    lines.append(f"🏁{total_label}: {fmt_total(total, unit)}")
     return "\n".join(lines)
