@@ -62,10 +62,14 @@ class OpenAPI:
         await self.send(ptype, **payload)
         return await self.wait(res_type)
 
-    async def find_symbol(self, account_id: int, name: str):
+    async def symbol_ids(self, account_id: int) -> dict:
+        """{'XAUUSD': id, …} — все символы счёта."""
         symbols = (await self.request(SYMBOLS_LIST_REQ, SYMBOLS_LIST_RES,
                                       ctidTraderAccountId=account_id)).get("symbol", [])
-        return next((s["symbolId"] for s in symbols if s.get("symbolName", "").upper() == name), None)
+        return {s.get("symbolName", "").upper(): s["symbolId"] for s in symbols}
+
+    async def find_symbol(self, account_id: int, name: str):
+        return (await self.symbol_ids(account_id)).get(name)
 
 
 async def refresh_token(http, client_id, client_secret, refresh: str) -> dict:
@@ -91,29 +95,29 @@ class NoPrices:
 
 class CTraderPrices:
     def __init__(self, client_id, client_secret, access_token, refresh, account_id,
-                 symbol="XAUUSD", live=True, token_file=None):
+                 symbols=("XAUUSD",), live=True, token_file=None):
         self.url = ws_url(live)
         self.client_id, self.client_secret = client_id, client_secret
         self.account_id = int(account_id)
-        self.symbol = symbol.upper()
+        self.symbols = [s.upper() for s in symbols]
         self.token_file = Path(token_file) if token_file else None
         # Свежие токены после обновления лежат в data/, а не в .env
         self.token = {"accessToken": access_token, "refreshToken": refresh, "expiresAt": 0}
         if self.token_file and self.token_file.exists():
             self.token.update(json.loads(self.token_file.read_text()))
-        self.bid = self.ask = None
-        self.updated = 0.0
+        self.quotes = {}  # 'XAUUSD' -> {'bid', 'ask', 'updated'}
 
     async def start(self):
         asyncio.create_task(self._run())
 
     async def get(self, symbol: str, direction: str) -> Decimal:
         """Цена входа: ask для BUY, bid для SELL."""
-        if symbol.upper() not in (self.symbol, "XAUUSD", "GOLD"):
-            raise PriceUnavailable(f"котировка {symbol} не подписана")
-        price = (self.ask if direction == "BUY" else self.bid) or self.bid or self.ask
-        if price is None or time.time() - self.updated > MAX_AGE:
-            raise PriceUnavailable("нет свежей котировки FxPro")
+        q = self.quotes.get(symbol.upper())
+        if q is None:
+            raise PriceUnavailable(f"котировка {symbol} у FxPro не подписана")
+        price = (q.get("ask") if direction == "BUY" else q.get("bid")) or q.get("bid") or q.get("ask")
+        if price is None or time.time() - q["updated"] > MAX_AGE:
+            raise PriceUnavailable(f"нет свежей котировки {symbol} у FxPro")
         return price
 
     async def _refresh(self, http, force=False):
@@ -149,11 +153,15 @@ class CTraderPrices:
                               clientId=self.client_id, clientSecret=self.client_secret)
             await api.request(ACCOUNT_AUTH_REQ, ACCOUNT_AUTH_RES, ctidTraderAccountId=self.account_id,
                               accessToken=self.token["accessToken"])
-            sid = await api.find_symbol(self.account_id, self.symbol)
-            if sid is None:
-                raise RuntimeError(f"символ {self.symbol} не найден на счёте")
-            await api.send(SUBSCRIBE_SPOTS_REQ, ctidTraderAccountId=self.account_id, symbolId=[sid])
-            log.info("cTrader: подписка на %s (id %s)", self.symbol, sid)
+            ids = await api.symbol_ids(self.account_id)
+            names = {ids[s]: s for s in self.symbols if s in ids}
+            missing = [s for s in self.symbols if s not in ids]
+            if missing:
+                log.warning("cTrader: на счёте нет символов %s", ", ".join(missing))
+            if not names:
+                raise RuntimeError("ни одного символа для подписки")
+            await api.send(SUBSCRIBE_SPOTS_REQ, ctidTraderAccountId=self.account_id, symbolId=list(names))
+            log.info("cTrader: подписка на %s", ", ".join(names.values()))
 
             async def ping():
                 while True:
@@ -172,11 +180,14 @@ class CTraderPrices:
                     if data.get("payloadType") != SPOT_EVENT:
                         continue
                     p = data.get("payload", {})
-                    if "bid" in p:
-                        self.bid = Decimal(p["bid"]) / PRICE_SCALE
-                    if "ask" in p:
-                        self.ask = Decimal(p["ask"]) / PRICE_SCALE
-                    self.updated = time.time()
+                    name = names.get(p.get("symbolId"))
+                    if name is None:
+                        continue
+                    q = self.quotes.setdefault(name, {})
+                    for side in ("bid", "ask"):
+                        if side in p:
+                            q[side] = Decimal(p[side]) / PRICE_SCALE
+                    q["updated"] = time.time()
             finally:
                 pinger.cancel()
 
@@ -187,20 +198,20 @@ class OandaPrices:
     Это НЕ цена FxPro: включается, только если задан OANDA_TOKEN, и пока не настроен cTrader.
     """
 
-    def __init__(self, token, live=False, instrument="XAU_USD"):
+    def __init__(self, token, live=False):
         host = "api-fxtrade.oanda.com" if live else "api-fxpractice.oanda.com"
         self.base = f"https://{host}/v3"
         self.headers = {"Authorization": f"Bearer {token}"}
-        self.instrument = instrument
         self.account = None
 
     async def start(self):
-        log.info("цена берётся у OANDA (%s), не у FxPro", self.instrument)
+        log.info("цена берётся у OANDA, не у FxPro")
 
     async def get(self, symbol: str, direction: str) -> Decimal:
         """Цена входа: ask для BUY, bid для SELL."""
-        if symbol.upper() not in ("XAUUSD", "GOLD"):
+        if not pair_ok(symbol):
             raise PriceUnavailable(f"котировка {symbol} не настроена")
+        instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
         try:
             async with aiohttp.ClientSession(headers=self.headers,
                                              timeout=aiohttp.ClientTimeout(total=15)) as http:
@@ -208,7 +219,7 @@ class OandaPrices:
                     async with http.get(f"{self.base}/accounts") as r:
                         self.account = (await r.json())["accounts"][0]["id"]
                 async with http.get(f"{self.base}/accounts/{self.account}/pricing",
-                                    params={"instruments": self.instrument}) as r:
+                                    params={"instruments": instrument}) as r:
                     data = await r.json()
             p = data["prices"][0]
             side = p["asks"] if direction == "BUY" else p["bids"]
@@ -217,28 +228,32 @@ class OandaPrices:
             raise PriceUnavailable(f"OANDA: {e!r}")
 
 
+def pair_ok(symbol: str) -> bool:
+    """Инструмент вида XAUUSD / GBPJPY — шесть букв, base+quote."""
+    return len(symbol) == 6 and symbol.isalpha()
+
+
 class TwelveDataPrices:
-    """Цена золота у Twelve Data (общая рыночная, не конкретного брокера).
+    """Цена у Twelve Data (общая рыночная, не конкретного брокера).
 
     Это НЕ цена FxPro: включается, только если задан TWELVEDATA_KEY, и пока не настроен cTrader.
     Отдаёт одну цену без bid/ask, поэтому для BUY и SELL она одинаковая.
     """
     URL = "https://api.twelvedata.com/price"
 
-    def __init__(self, key, symbol="XAU/USD"):
+    def __init__(self, key):
         self.headers = {"Authorization": f"apikey {key}"}
-        self.symbol = symbol
 
     async def start(self):
-        log.info("цена берётся у Twelve Data (%s), не у FxPro", self.symbol)
+        log.info("цена берётся у Twelve Data, не у FxPro")
 
     async def get(self, symbol: str, direction: str) -> Decimal:
-        if symbol.upper() not in ("XAUUSD", "GOLD"):
+        if not pair_ok(symbol):
             raise PriceUnavailable(f"котировка {symbol} не настроена")
         try:
             async with aiohttp.ClientSession(headers=self.headers,
                                              timeout=aiohttp.ClientTimeout(total=15)) as http:
-                async with http.get(self.URL, params={"symbol": self.symbol}) as r:
+                async with http.get(self.URL, params={"symbol": f"{symbol[:3]}/{symbol[3:]}".upper()}) as r:
                     data = await r.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             raise PriceUnavailable(f"Twelve Data: {e!r}")
@@ -251,7 +266,7 @@ def from_config(config):
     if config.CTRADER_CLIENT_ID and config.CTRADER_ACCESS_TOKEN and config.CTRADER_ACCOUNT_ID:
         return CTraderPrices(config.CTRADER_CLIENT_ID, config.CTRADER_CLIENT_SECRET,
                              config.CTRADER_ACCESS_TOKEN, config.CTRADER_REFRESH_TOKEN,
-                             config.CTRADER_ACCOUNT_ID, config.FXPRO_SYMBOL, config.CTRADER_LIVE,
+                             config.CTRADER_ACCOUNT_ID, config.FXPRO_SYMBOLS, config.CTRADER_LIVE,
                              config.CTRADER_TOKEN_FILE)
     if config.OANDA_TOKEN:
         return OandaPrices(config.OANDA_TOKEN, config.OANDA_LIVE)

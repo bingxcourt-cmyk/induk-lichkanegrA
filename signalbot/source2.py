@@ -3,8 +3,8 @@ import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from .forexbulls import (classify_reply, format_close, format_signal, format_stop, format_tp,
-                         parse_signal, price2)
+from .forexbulls import (classify_reply, digits, fmt_level, format_close, format_signal, format_stop,
+                         format_tp, parse_signal, symbol_of)
 from .logic import D
 from .prices import PriceUnavailable
 
@@ -34,13 +34,13 @@ class Source2:
                     pass
             return None
 
-    async def _post_signal(self, route, src_id, direction, sl: Decimal, tp, reply_to=None):
-        entry = await self._price("XAUUSD", direction)
-        text = format_signal(direction, "XAUUSD", entry, sl, tp, route["header"])
+    async def _post_signal(self, route, src_id, symbol, direction, sl: Decimal, tp, reply_to=None):
+        entry = await self._price(symbol, direction)
+        text = format_signal(direction, symbol, entry, sl, tp, route["header"])
         dst = await self.bot.send(route["target"], text, reply_to=reply_to, html=True)
-        sid = self.db.s2_add(route["id"], src_id, route["target"], dst, direction, "XAUUSD", entry, sl, tp,
+        sid = self.db.s2_add(route["id"], src_id, route["target"], dst, direction, symbol, entry, sl, tp,
                              self.now().isoformat())
-        log.info("сигнал %s вход %s SL %s TP %s -> %s", direction, entry, sl, tp, dst)
+        log.info("сигнал %s %s вход %s SL %s TP %s -> %s", direction, symbol, entry, sl, tp, dst)
         return sid
 
     def _thread(self, route, msg):
@@ -60,12 +60,15 @@ class Source2:
             sig = parse_signal(text)
             if sig:
                 if not self.db.s2_by_src(route["id"], msg.id):
-                    await self._post_signal(route, msg.id, sig.direction, sig.sl, sig.tp)
+                    await self._post_signal(route, msg.id, sig.symbol, sig.direction, sig.sl, sig.tp)
                 return
             kind = classify_reply(text)
             if not kind or kind[0] not in STANDALONE:
                 return  # всё остальное (ссылки, реклама, приветствия, ожидания) не копируем
             opened = self.db.s2_open(route["id"])
+            sym = symbol_of(text)
+            if sym:  # «Close off profits on GBPJPY» — к сигналу по этой паре
+                opened = [r for r in opened if r["symbol"] == sym]
             row = opened[-1] if opened else None
             if row is None or self.now() - datetime.fromisoformat(row["created_at"]) > STANDALONE_MAX_AGE:
                 return
@@ -75,7 +78,7 @@ class Source2:
             if kind is None:
                 return
             sig = parse_signal(text)
-            if kind[0] == "other" and sig:
+            if kind[0] == "other" and sig and sig.symbol == row["symbol"]:
                 kind = ("reentry", sig.direction, sig.sl, sig.tp)  # новый сигнал в ветке старого
         await self._apply(route, msg, row, kind, text)
 
@@ -89,7 +92,7 @@ class Source2:
         if act == "close":
             if not is_open:
                 return
-            price = await self._price("XAUUSD", row["direction"]) if entry is not None else None
+            price = await self._price(row["symbol"], row["direction"]) if entry is not None else None
             await self.bot.send(chat, format_close(entry, sl0, price), reply_to=reply_to)
             self.db.s2_update(row["id"], status="profit")
         elif act == "tp":
@@ -97,7 +100,7 @@ class Source2:
                 return
             price = tp
             if price is None and entry is not None:
-                price = await self._price("XAUUSD", row["direction"])
+                price = await self._price(row["symbol"], row["direction"])
             await self.bot.send(chat, format_tp(entry, sl0, price), reply_to=reply_to)
             self.db.s2_update(row["id"], status="profit")
         elif act == "sl":
@@ -124,7 +127,7 @@ class Source2:
                 self.db.s2_update(row["id"], **fields)
             ru = await self.translator.translate(text)
             if not ru and new_sl is not None:
-                ru = f"переносим стоп-лосс на {price2(new_sl)}"
+                ru = f"переносим стоп-лосс на {fmt_level(new_sl, digits(row['symbol'], sl0))}"
             if ru:
                 await self.bot.send(chat, ru, reply_to=reply_to)
         elif act in ("again", "reentry"):
@@ -137,10 +140,11 @@ class Source2:
                 # «BUY XAUUSD AGAIN NOW»: прошлый сигнал закрыт по стопу, новый — отдельным постом
                 if is_open:
                     await self.bot.send(chat, format_stop(row["direction"], entry, sl0, sl), reply_to=reply_to)
-                new_id = await self._post_signal(route, msg.id, direction, new_sl, new_tp)
+                new_id = await self._post_signal(route, msg.id, row["symbol"], direction, new_sl, new_tp)
                 status = "stopped" if is_open else row["status"]
             else:
-                new_id = await self._post_signal(route, msg.id, direction, new_sl, new_tp, reply_to=reply_to)
+                new_id = await self._post_signal(route, msg.id, row["symbol"], direction, new_sl, new_tp,
+                                                 reply_to=reply_to)
                 status = "reentered" if is_open else row["status"]
             self.db.s2_update(row["id"], child_id=new_id, status=status)
         else:

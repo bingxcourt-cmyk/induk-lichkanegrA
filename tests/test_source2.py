@@ -37,8 +37,13 @@ def test_parse():
     for text, (d, sl, tp) in cases.items():
         s = parse_signal(text)
         assert s and (s.direction, s.sl, s.tp) == (d, Decimal(sl), tp and Decimal(tp)), (text, s)
+    # другие пары
+    s = parse_signal("Sell GBPJPY \nStop loss ~ 215.738\ntake profit  ~215.15")
+    assert (s.symbol, s.direction, s.sl, s.tp) == ("GBPJPY", "SELL", Decimal("215.738"), Decimal("215.15"))
+    s = parse_signal("SELL GBPUSD\nSL 1.35466\nTP 1.34919")
+    assert (s.symbol, s.sl, s.tp) == ("GBPUSD", Decimal("1.35466"), Decimal("1.34919"))
+    assert parse_signal("GBPJPY buys.\n\nSL 216.622\nTP 217.195").symbol == "GBPJPY"
     for junk in ("HELLO TEAM", "BUY XAUUSD AGAIN NOW", "Close off profits", "", "BUY XAUUSD",
-                 "SELL GBPJPY\nSL 213.843\nTP 213.1", "Sell GBPJPY \nStop loss ~ 215.738\ntake profit  ~215.15",
                  "Recovery setup 📈\n\nBUY XAGUSD (SILVER)\nSP 68.99489\nTP 69.96029",
                  "Expecting sells on XAUUSD", "BUY 4018.76\n\nTP 4100.88"):
         assert parse_signal(junk) is None, junk
@@ -49,6 +54,7 @@ def test_classify():
     assert classify_reply("SELL XAUUSD AGAIN NOW") == ("again", "SELL", None, None)
     assert classify_reply("Let’s buy XAUUSD again now")[:2] == ("again", "BUY")
     for text in ("Close off profits", "Close profits 💪🔥", "Close off on profits \n1:2.26RR",
+                 "Close GBPUSD in profits", "Close off profits on GBPJPY",
                  "we may close off profits now (1:3RR) secured", "Close the trade in profits now 🚀🚀"):
         assert classify_reply(text) == ("close",), text
     for text in ("XAUUSD Went the opposite side.\n\nClose off", "setup invalidated on gold. Close off",
@@ -70,8 +76,7 @@ def test_classify():
                  "Let’s close off partial profits team"):
         assert classify_reply(text) == ("other",), text
     for junk in ("join us https://t.me/xxx", "GOT PAID TODAY IN THE VIP", "Join VIP now", "DM me for premium",
-                 "VIP members got 300 pips", "Getting paid 💯", "Close GBPUSD in profits",
-                 "Close off profits on GBPJPY", "🔥🔥🔥", ""):
+                 "VIP members got 300 pips", "Getting paid 💯", "🔥🔥🔥", ""):
         assert classify_reply(junk) is None, junk
 
 
@@ -82,6 +87,10 @@ def test_format():
     short = format_signal("SELL", "XAUUSD", Decimal("4050.005"), Decimal("4080.5"), Decimal("4001.123"))
     assert short.startswith("#GOLD SHORT\n\nВход 4050.01\n\nSL: 4080.50\n\nTakeprofit: 4001.12\n\n")
     assert "Вход по рынку" in format_signal("BUY", "XAUUSD", None, s.sl, s.tp)
+    gj = format_signal("SELL", "GBPJPY", Decimal("215.4567"), Decimal("215.738"), Decimal("215.15"))
+    assert gj.startswith("#GBPJPY SHORT\n\nВход 215.457\n\nSL: 215.738\n\nTakeprofit: 215.150\n\n"), gj
+    gu = format_signal("BUY", "GBPUSD", Decimal("1.351234"), Decimal("1.34919"), None)
+    assert gu.startswith("#GBPUSD LONG\n\nВход 1.35123\n\nSL: 1.34919\n\nTakeprofit: открытый"), gu
 
 
 def test_profit():

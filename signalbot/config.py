@@ -46,6 +46,9 @@ CTRADER_REFRESH_TOKEN = os.environ.get("CTRADER_REFRESH_TOKEN", "")
 CTRADER_ACCOUNT_ID = os.environ.get("CTRADER_ACCOUNT_ID", "")
 CTRADER_LIVE = os.environ.get("CTRADER_LIVE", "1") not in ("0", "false", "no", "")
 FXPRO_SYMBOL = os.environ.get("FXPRO_SYMBOL", "XAUUSD")
+# все инструменты, на которые подписываемся у FxPro (как называются на счёте cTrader)
+FXPRO_SYMBOLS = [x.strip() for x in os.environ.get(
+    "FXPRO_SYMBOLS", "XAUUSD,XAGUSD,GBPJPY,GBPUSD,EURUSD,EURJPY,USDJPY,AUDUSD,USDCAD,GBPCAD").split(",") if x.strip()]
 
 # Временно, пока не одобрен cTrader: цена OANDA (v20 API). Если cTrader настроен, OANDA не используется.
 OANDA_TOKEN = os.environ.get("OANDA_TOKEN", "")

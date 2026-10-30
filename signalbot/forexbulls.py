@@ -1,6 +1,6 @@
 """Источник 2 (Forex Bulls Vip Trades): разбор сообщений и тексты постов.
 
-Форматы взяты из истории канала за полгода. Пересылаем только золото.
+Форматы взяты из истории канала за полгода. Пересылаем золото и все пары канала.
 Модуль не зависит от Telegram — его можно проверять тестами отдельно.
 """
 import html
@@ -13,19 +13,21 @@ from .logic import D, NUM, round2
 
 BOT_LINK = "https://t.me/delaydengizdravo_bot"
 
-GOLD_RE = re.compile(r"\b(?:XAUUSD|XAU|GOLD)\b", re.I)
-# другие инструменты канала: GBPJPY, GBPUSD, EURUSD, XAGUSD, «GJ»…
-OTHER_RE = re.compile(r"\b(?!XAUUSD\b)(?:[A-Z]{3}(?:USD|JPY|GBP|EUR|CHF|CAD|AUD|NZD)|XAG\w*|SILVER|GJ|GU|EU|UJ"
-                      r"|US30|NAS\w*|BTC\w*)\b", re.I)
+# инструменты канала: XAUUSD/GOLD, XAGUSD/SILVER, валютные пары и их сокращения («GJ» — GBPJPY)
+SYMBOL_RE = re.compile(r"\b(XAUUSD|XAU|GOLD|XAGUSD|XAG|SILVER|(?:USD|EUR|GBP|AUD|NZD|CAD|CHF)"
+                       r"(?:USD|JPY|GBP|EUR|CHF|CAD|AUD|NZD)|GJ|GU|EU|UJ|US30|NAS100|BTCUSD)\b", re.I)
+ALIASES = {"XAU": "XAUUSD", "GOLD": "XAUUSD", "XAG": "XAGUSD", "SILVER": "XAGUSD",
+           "GJ": "GBPJPY", "GU": "GBPUSD", "EU": "EURUSD", "UJ": "USDJPY"}
+DISPLAY = {"XAUUSD": "GOLD", "XAGUSD": "SILVER"}
 DIR_RE = re.compile(r"\b(buys?|sells?)\b", re.I)
 SIDE_RE = re.compile(r"\b(long|short)\b(?!\s+term)", re.I)  # «short term buys» — это покупки
 SL_RE = re.compile(r"\b(?:SL|stop\s*-?\s*loss)\b[^\d\n]{0,12}?" + NUM, re.I)
 TP_RE = re.compile(r"\b(?:TP|take\s*-?\s*profit)\b[^\d\n]{0,12}?" + NUM, re.I)
 TP_OPEN_RE = re.compile(r"\b(?:TP|take\s*-?\s*profit)\b\s*[:;=\-~]?\s*open\b", re.I)
 
-AGAIN_RE = re.compile(r"\b(BUY|SELL)\s+#?(?:XAUUSD|GOLD)\s+AGAIN\b", re.I)
+AGAIN_RE = re.compile(r"\b(BUY|SELL)\s+#?[A-Z0-9]{2,7}\s+AGAIN\b", re.I)
 REENTRY_RE = re.compile(r"\bre-?\s?entry\b|\bre-?\s?enter\b|\brecovery\s+(?:entry|setup)\b"
-                        r"|\b(?:buy|sell)\w*\s+(?:xauusd|gold)\s+again\b", re.I)
+                        r"|\b(?:buy|sell)\w*\s+[a-z0-9]{2,7}\s+again\b", re.I)
 LATER_RE = re.compile(r"\b(?:coming|soon|shortly|incoming|later|hour|tomorrow|next\s+week|if\s+you\s+hadn"
                       r"|sending\s+in|send\s+in|will)\b", re.I)
 TP_HIT_RE = re.compile(r"\b(?:tp|take\s*-?\s*profit)\b[^\n]{0,15}?\b(?:hit|smashed|reached|done|secured)\b", re.I)
@@ -50,14 +52,22 @@ SKIP = "SKIP"
 @dataclass
 class Signal2:
     direction: str          # BUY / SELL
-    symbol: str             # XAUUSD
+    symbol: str             # XAUUSD, GBPJPY…
     sl: Decimal
     tp: Optional[Decimal]   # None — тейк открытый
 
 
-def is_other_symbol(text: str) -> bool:
-    """В сообщении другой инструмент, а не золото."""
-    return bool(OTHER_RE.search(text or "")) and not GOLD_RE.search(text or "")
+def symbol_of(text: str):
+    """Первый инструмент в тексте (XAUUSD, GBPJPY…) или None."""
+    m = SYMBOL_RE.search(text or "")
+    if not m:
+        return None
+    sym = m.group(1).upper()
+    return ALIASES.get(sym, sym)
+
+
+def display_symbol(symbol: str) -> str:
+    return DISPLAY.get(symbol, symbol)
 
 
 def direction_of(text: str):
@@ -75,18 +85,18 @@ def levels(text: str):
 
 
 def parse_signal(text: str):
-    """Новый сигнал по золоту: направление и SL обязательны, TP может быть открытым.
+    """Новый сигнал: направление и SL обязательны, TP может быть открытым; без инструмента — золото.
 
     «BUY XAUUSD / SL 4019.957 / TP 4068.642», «SELLS ON XAUUSD. SL … TP …», «XAUUSD BUYS SL …»,
     «Let’s buy XAUUSD Stop loss … Take profit; …», «Sell XAUUSD SL … TP open».
     """
-    if not text or is_other_symbol(text) or AGAIN_RE.search(text):
+    if not text or AGAIN_RE.search(text):
         return None
     direction = direction_of(text)
     sl, tp = levels(text)
     if not direction or sl is None:
         return None
-    return Signal2(direction, "XAUUSD", sl, tp)
+    return Signal2(direction, symbol_of(text) or "XAUUSD", sl, tp)
 
 
 def classify_reply(text: str):
@@ -100,7 +110,7 @@ def classify_reply(text: str):
     ('other',) — прочее, решает перевод через Claude.
     """
     text = (text or "").strip()
-    if not text or LINK_RE.search(text) or PROMO_RE.search(text) or is_other_symbol(text):
+    if not text or LINK_RE.search(text) or PROMO_RE.search(text):
         return None
     m = AGAIN_RE.search(text)
     if m:
@@ -129,6 +139,17 @@ def price2(x: Decimal) -> str:
     return f"{round2(x):.2f}"
 
 
+def digits(symbol: str, sl: Decimal) -> int:
+    """Знаков после запятой: золото — сотые, остальное — как в уровнях сигнала (216.622, 1.35466)."""
+    if symbol == "XAUUSD":
+        return 2
+    return max(-sl.as_tuple().exponent, 2)
+
+
+def fmt_level(x: Decimal, n: int) -> str:
+    return f"{x.quantize(Decimal(1).scaleb(-n), rounding='ROUND_HALF_UP'):.{n}f}"
+
+
 def pct(x: Decimal) -> str:
     """+0.53% / +2% / -1% — сотые, без лишних нулей."""
     s = format(round2(x).normalize(), "f")
@@ -140,14 +161,15 @@ def pct(x: Decimal) -> str:
 def format_signal(direction: str, symbol: str, entry, sl: Decimal, tp, header: str = "") -> str:
     """HTML-текст поста. entry=None — цену получить не удалось, пишем «по рынку»."""
     side = "SHORT" if direction == "SELL" else "LONG"
+    n = digits(symbol, sl)
     lines = []
     if header.strip():
         lines.append(html.escape(header.strip()))
     lines += [
-        f"#GOLD {side}",
-        f"Вход {price2(entry)}" if entry is not None else "Вход по рынку",
-        f"SL: {price2(sl)}",
-        f"Takeprofit: {price2(tp)}" if tp is not None else "Takeprofit: открытый",
+        f"#{display_symbol(symbol)} {side}",
+        f"Вход {fmt_level(entry, n)}" if entry is not None else "Вход по рынку",
+        f"SL: {fmt_level(sl, n)}",
+        f"Takeprofit: {fmt_level(tp, n)}" if tp is not None else "Takeprofit: открытый",
         f'в <a href="{BOT_LINK}">этом</a> боте отображено точное количество лотов, на которое '
         "нужно открыть позицию, дабы при стопе ты потерял ровно 1% от своего депозита",
     ]
@@ -192,7 +214,7 @@ def format_stop(direction: str, entry, sl0: Decimal, sl: Decimal) -> str:
 STOP_TEXT = "🚨 сработал стоп-лосс. -1% к депозиту"
 
 TRANSLATE_PROMPT = (
-    "Ты переводишь сообщения трейдера из канала с сигналами по золоту (XAUUSD). "
+    "Ты переводишь сообщения трейдера из канала с сигналами по золоту (XAUUSD) и валютным парам. "
     "Сообщение — ответ на открытую позицию. Пропускай только то, что говорит подписчику, "
     "что делать с этой сделкой или что с ней происходит: держать, закрыть часть, перенести стоп, "
     "добавиться, тейк или стоп близко, цена идёт к цели и т.п. Такое переведи на русский "
