@@ -23,20 +23,56 @@ def test_parse():
         assert (s.direction, s.symbol, s.sl, s.tp) == ("BUY", "XAUUSD", Decimal("4019.957"), Decimal("4068.642"))
     s = parse_signal("SELL XAUUSD\nSL 4080.5\nTP 4001.123")
     assert (s.direction, s.sl, s.tp) == ("SELL", Decimal("4080.5"), Decimal("4001.123"))
-    for junk in ("HELLO TEAM", "BUY XAUUSD AGAIN NOW", "Close off profits", "", "BUY XAUUSD"):
+    # форматы из истории канала
+    cases = {
+        "SELLS ON XAUUSD.\n\nSL 4596.01\nTP 4512.12\n\nEnsure proper risk management": ("SELL", "4596.01", "4512.12"),
+        "XAUUSD BUYS\nSL 4408.25\nTP 4435.00": ("BUY", "4408.25", "4435.00"),
+        "One take for the week.\n\n\nBuy XAUUSD now\nSL 4052\nTP OPEN": ("BUY", "4052", None),
+        "Let’s buy XAUUSD \nStop loss 4306.47\nTake profit; 4326.66": ("BUY", "4306.47", "4326.66"),
+        "Short term buys on XAUUSD \nSL 4023.17\nTP 4035.12": ("BUY", "4023.17", "4035.12"),
+        "xauusd sells\nsl 4070.63\n\nensure proper risk managment": ("SELL", "4070.63", None),
+        "Buy gold\nSL 4351.687\n\nEnsure proper risk management": ("BUY", "4351.687", None),
+        "PPI NEWS COMING UP SOON.\n\nExpecting sells\n\nStoploss 4160.576\nTP 4118.976": ("SELL", "4160.576", "4118.976"),
+    }
+    for text, (d, sl, tp) in cases.items():
+        s = parse_signal(text)
+        assert s and (s.direction, s.sl, s.tp) == (d, Decimal(sl), tp and Decimal(tp)), (text, s)
+    for junk in ("HELLO TEAM", "BUY XAUUSD AGAIN NOW", "Close off profits", "", "BUY XAUUSD",
+                 "SELL GBPJPY\nSL 213.843\nTP 213.1", "Sell GBPJPY \nStop loss ~ 215.738\ntake profit  ~215.15",
+                 "Recovery setup 📈\n\nBUY XAGUSD (SILVER)\nSP 68.99489\nTP 69.96029",
+                 "Expecting sells on XAUUSD", "BUY 4018.76\n\nTP 4100.88"):
         assert parse_signal(junk) is None, junk
 
 
 def test_classify():
-    assert classify_reply("BUY XAUUSD AGAIN NOW") == ("again", "BUY")
-    assert classify_reply("SELL XAUUSD AGAIN NOW") == ("again", "SELL")
-    assert classify_reply("Close off profits") == ("close",)
-    assert classify_reply("hold the buys") == ("other",)
-    assert classify_reply("join us https://t.me/xxx") is None
-    for promo in ("GOT PAID TODAY IN THE VIP", "Join VIP now", "DM me for premium", "VIP members got 300 pips"):
-        assert classify_reply(promo) is None, promo
-    assert classify_reply("🔥🔥🔥") is None
-    assert classify_reply("") is None
+    assert classify_reply("BUY XAUUSD AGAIN NOW") == ("again", "BUY", None, None)
+    assert classify_reply("SELL XAUUSD AGAIN NOW") == ("again", "SELL", None, None)
+    assert classify_reply("Let’s buy XAUUSD again now")[:2] == ("again", "BUY")
+    for text in ("Close off profits", "Close profits 💪🔥", "Close off on profits \n1:2.26RR",
+                 "we may close off profits now (1:3RR) secured", "Close the trade in profits now 🚀🚀"):
+        assert classify_reply(text) == ("close",), text
+    for text in ("XAUUSD Went the opposite side.\n\nClose off", "setup invalidated on gold. Close off",
+                 "Close the buys on XAUUSD and hold GJ BUYS", "our XAUUSD setup was invalidated"):
+        assert classify_reply(text) == ("closeoff",), text
+    for text in ("Our sl was hit", "SL triggered.\n\nLet’s go again next week 🤎💪!",
+                 "Gold takes out with a loss.", "We’re taken out.\n\nWe shall go harder tomorrow"):
+        assert classify_reply(text) == ("sl",), text
+    for text in ("OUR TAKE PROFIT WAS HIT 🔥", "Take profit smashed 💪🔥", "fire trade; tp hit", "Our TP was hit 🔥"):
+        assert classify_reply(text) == ("tp",), text
+    assert classify_reply("Adjust the stop loss to 4188.24\nTP 4242.70") == ("move", Decimal("4188.24"), Decimal("4242.70"))
+    assert classify_reply("Extend the SL to 4013.15 and hold the sells") == ("move", Decimal("4013.15"), None)
+    assert classify_reply("Move SL to entry") == ("move", None, None)
+    assert classify_reply("Re-entry;\n\nSell XAUUSD\n\nSame SL and TP") == ("reentry", "SELL", None, None)
+    assert classify_reply("RE-ENTRY @current price \nStop loss: 4015.59") == ("reentry", None, Decimal("4015.59"), None)
+    assert classify_reply("Sells re-entry")[:2] == ("reentry", "SELL")
+    for text in ("hold the buys", "Running in profits 💪🔥", "Re-entry coming up in an hour 🙏🔥",
+                 "Good morning team. Sending in a recovery setup.",
+                 "Let’s close off partial profits team"):
+        assert classify_reply(text) == ("other",), text
+    for junk in ("join us https://t.me/xxx", "GOT PAID TODAY IN THE VIP", "Join VIP now", "DM me for premium",
+                 "VIP members got 300 pips", "Getting paid 💯", "Close GBPUSD in profits",
+                 "Close off profits on GBPJPY", "🔥🔥🔥", ""):
+        assert classify_reply(junk) is None, junk
 
 
 def test_format():
@@ -128,6 +164,41 @@ def test_flow():
     assert row["dst_msg_id"] == 101 and row["entry"] == "4031.4" and row["status"] == "stopped"
     latest = db.s2_latest(route["id"], 3)
     assert latest["dst_msg_id"] == 104 and latest["status"] == "profit"
+
+
+def test_threads_and_updates():
+    """Реплай на реплай, сообщения без реплая, перенос стопа, тейк, перезаход."""
+    db = DB(os.path.join(tempfile.mkdtemp(), "t.db"))
+    route = make_route(db)
+    bot, fx = FakeBot(), FakePrices()
+    s2 = Source2(bot, db, fx, FakeTranslator(), datetime.now)
+    fx.price = Decimal("4000")
+
+    async def run():
+        await s2.handle(route, Msg(1, "BUY XAUUSD\nSL 3990\nTP 4030"))          # 101, вход 4000, риск 10
+        await s2.handle(route, Msg(2, "Running in profits 💪", 1))                # перевод None -> тишина
+        fx.price = Decimal("4015")
+        await s2.handle(route, Msg(3, "Close profits now", 2))                    # реплай на реплай -> 102
+        await s2.handle(route, Msg(4, "Sell XAUUSD\nSL 4010\nTP open"))         # 103, вход 4015
+        await s2.handle(route, Msg(5, "Adjust the SL to 4015 and hold", 4))      # 104 (перевода нет)
+        await s2.handle(route, Msg(6, "Our SL was hit"))                          # без реплая -> 105, 0%
+        await s2.handle(route, Msg(7, "Buy gold\nSL 4005"))                      # 106
+        await s2.handle(route, Msg(8, "Re-entry;\n\nBuy XAUUSD\n\nSame SL and TP", 7))  # 107 реплаем на 106
+        fx.price = Decimal("4035")
+        await s2.handle(route, Msg(9, "Take profit hit 🔥", 8))                   # тейк открытый -> по цене, 108
+        await s2.handle(route, Msg(10, "Close profits"))                          # открытых нет -> тишина
+    asyncio.run(run())
+    texts = [(r, t.split("\n")[0]) for _, r, t in bot.sent]
+    assert texts == [
+        (None, "#GOLD LONG"),
+        (101, "закрываем сделку в профит по текущей цене. +1.5% к депозиту"),
+        (None, "#GOLD SHORT"),
+        (103, "переносим стоп-лосс на 4015.00"),
+        (103, "сработал стоп-лосс в безубыток. 0% к депозиту"),
+        (None, "#GOLD LONG"),
+        (106, "#GOLD LONG"),
+        (107, "🔥 тейк-профит взят. +2% к депозиту"),  # перезаход по 4015, SL 4005, тейк по цене 4035
+    ], texts
 
 
 def test_no_price():

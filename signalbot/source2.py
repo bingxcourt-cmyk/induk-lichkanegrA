@@ -1,12 +1,18 @@
 """Правила «Forex Bulls» (источник 2, Forex Bulls Vip Trades) для перенаправления."""
 import logging
+from datetime import datetime, timedelta
 from decimal import Decimal
 
-from .forexbulls import STOP_TEXT, classify_reply, format_close, format_signal, parse_signal
+from .forexbulls import (classify_reply, format_close, format_signal, format_stop, format_tp,
+                         parse_signal, price2)
 from .logic import D
 from .prices import PriceUnavailable
 
 log = logging.getLogger("forexbulls")
+
+# что можно сделать сообщением без реплая — с последним открытым сигналом
+STANDALONE = ("close", "closeoff", "tp", "sl", "move", "again", "reentry")
+STANDALONE_MAX_AGE = timedelta(days=2)  # старее — не угадываем, к какому сигналу это относится
 
 
 class Source2:
@@ -28,51 +34,117 @@ class Source2:
                     pass
             return None
 
-    async def _post_signal(self, route, src_id, direction, symbol, sl: Decimal, tp: Decimal):
-        entry = await self._price(symbol, direction)
-        text = format_signal(direction, symbol, entry, sl, tp, route["header"])
-        dst = await self.bot.send(route["target"], text, html=True)
-        sid = self.db.s2_add(route["id"], src_id, route["target"], dst, direction, symbol, entry, sl, tp,
+    async def _post_signal(self, route, src_id, direction, sl: Decimal, tp, reply_to=None):
+        entry = await self._price("XAUUSD", direction)
+        text = format_signal(direction, "XAUUSD", entry, sl, tp, route["header"])
+        dst = await self.bot.send(route["target"], text, reply_to=reply_to, html=True)
+        sid = self.db.s2_add(route["id"], src_id, route["target"], dst, direction, "XAUUSD", entry, sl, tp,
                              self.now().isoformat())
-        log.info("сигнал %s %s вход %s -> %s", direction, symbol, entry, dst)
+        log.info("сигнал %s вход %s SL %s TP %s -> %s", direction, entry, sl, tp, dst)
         return sid
+
+    def _thread(self, route, msg):
+        """Сигнал, к ветке которого относится сообщение (реплай на сигнал или на реплай к нему)."""
+        reply_id = msg.reply_to.reply_to_msg_id if msg.reply_to else None
+        return self.db.s2_latest(route["id"], reply_id) if reply_id else None
 
     async def handle(self, route, msg):
         text = msg.message or ""
-        reply_id = msg.reply_to.reply_to_msg_id if msg.reply_to else None
-        row = self.db.s2_latest(route["id"], reply_id) if reply_id else None
+        row = self._thread(route, msg)
+        if row is not None:
+            self.db.s2_link(route["id"], msg.id, row["id"])  # чтобы ответы на этот реплай тоже нашли сигнал
+        if getattr(msg, "media", None) and not (row is None and parse_signal(text)):
+            return  # медиа не копируем (сигнал с картинкой — копируем текстом)
 
         if row is None:
             sig = parse_signal(text)
-            if sig and not self.db.s2_by_src(route["id"], msg.id):
-                await self._post_signal(route, msg.id, sig.direction, sig.symbol, sig.sl, sig.tp)
-            return  # всё остальное (медиа, ссылки, приветствия) не копируем
-
-        if getattr(msg, "media", None):
-            return  # медиа в реплаях не копируем
-        kind = classify_reply(text)
-        if kind is None:
-            return
-        entry = D(row["entry"]) if row["entry"] else None
-        sl, tp = D(row["sl"]), D(row["tp"])
-        chat, reply_to = row["dst_chat"], row["dst_msg_id"]
-
-        if kind[0] == "close":
-            if row["status"] != "open":
+            if sig:
+                if not self.db.s2_by_src(route["id"], msg.id):
+                    await self._post_signal(route, msg.id, sig.direction, sig.sl, sig.tp)
                 return
-            price = await self._price(row["symbol"], row["direction"]) if entry is not None else None
-            await self.bot.send(chat, format_close(entry, sl, price), reply_to=reply_to)
+            kind = classify_reply(text)
+            if not kind or kind[0] not in STANDALONE:
+                return  # всё остальное (ссылки, реклама, приветствия, ожидания) не копируем
+            opened = self.db.s2_open(route["id"])
+            row = opened[-1] if opened else None
+            if row is None or self.now() - datetime.fromisoformat(row["created_at"]) > STANDALONE_MAX_AGE:
+                return
+            self.db.s2_link(route["id"], msg.id, row["id"])
+        else:
+            kind = classify_reply(text)
+            if kind is None:
+                return
+            sig = parse_signal(text)
+            if kind[0] == "other" and sig:
+                kind = ("reentry", sig.direction, sig.sl, sig.tp)  # новый сигнал в ветке старого
+        await self._apply(route, msg, row, kind, text)
+
+    async def _apply(self, route, msg, row, kind, text):
+        entry = D(row["entry"]) if row["entry"] else None
+        sl, tp = D(row["sl"]), (D(row["tp"]) if row["tp"] else None)
+        sl0 = D(row["sl0"]) if row["sl0"] else sl
+        chat, reply_to, is_open = row["dst_chat"], row["dst_msg_id"], row["status"] == "open"
+        act = kind[0]
+
+        if act == "close":
+            if not is_open:
+                return
+            price = await self._price("XAUUSD", row["direction"]) if entry is not None else None
+            await self.bot.send(chat, format_close(entry, sl0, price), reply_to=reply_to)
             self.db.s2_update(row["id"], status="profit")
-        elif kind[0] == "again":
+        elif act == "tp":
+            if not is_open:
+                return
+            price = tp
+            if price is None and entry is not None:
+                price = await self._price("XAUUSD", row["direction"])
+            await self.bot.send(chat, format_tp(entry, sl0, price), reply_to=reply_to)
+            self.db.s2_update(row["id"], status="profit")
+        elif act == "sl":
+            if not is_open:
+                return
+            await self.bot.send(chat, format_stop(row["direction"], entry, sl0, sl), reply_to=reply_to)
+            self.db.s2_update(row["id"], status="stopped")
+        elif act == "closeoff":
+            if not is_open:
+                return
+            ru = await self.translator.translate(text)
+            await self.bot.send(chat, ru or "закрываем сделку по текущей цене.", reply_to=reply_to)
+            self.db.s2_update(row["id"], status="closed")
+        elif act == "move":
+            if not is_open:
+                return
+            new_sl = kind[1] if kind[1] is not None else entry
+            fields = {}
+            if new_sl is not None:
+                fields["sl"] = str(new_sl)
+            if kind[2] is not None:
+                fields["tp"] = str(kind[2])
+            if fields:
+                self.db.s2_update(row["id"], **fields)
+            ru = await self.translator.translate(text)
+            if not ru and new_sl is not None:
+                ru = f"переносим стоп-лосс на {price2(new_sl)}"
+            if ru:
+                await self.bot.send(chat, ru, reply_to=reply_to)
+        elif act in ("again", "reentry"):
             if self.db.s2_by_src(route["id"], msg.id):
                 return
-            if row["status"] == "open":
-                await self.bot.send(chat, STOP_TEXT, reply_to=reply_to)
-            new_id = await self._post_signal(route, msg.id, kind[1], row["symbol"], sl, tp)
-            self.db.s2_update(row["id"], child_id=new_id,
-                              status="stopped" if row["status"] == "open" else row["status"])
+            direction = kind[1] or row["direction"]
+            new_sl = kind[2] if kind[2] is not None else sl0
+            new_tp = kind[3] if kind[3] is not None else tp
+            if act == "again":
+                # «BUY XAUUSD AGAIN NOW»: прошлый сигнал закрыт по стопу, новый — отдельным постом
+                if is_open:
+                    await self.bot.send(chat, format_stop(row["direction"], entry, sl0, sl), reply_to=reply_to)
+                new_id = await self._post_signal(route, msg.id, direction, new_sl, new_tp)
+                status = "stopped" if is_open else row["status"]
+            else:
+                new_id = await self._post_signal(route, msg.id, direction, new_sl, new_tp, reply_to=reply_to)
+                status = "reentered" if is_open else row["status"]
+            self.db.s2_update(row["id"], child_id=new_id, status=status)
         else:
             ru = await self.translator.translate(text)
             if ru:
                 await self.bot.send(chat, ru, reply_to=reply_to)
-        log.info("реплай %s на сигнал #%s", kind[0], row["id"])
+        log.info("%s по сигналу #%s", act, row["id"])

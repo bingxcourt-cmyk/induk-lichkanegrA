@@ -47,12 +47,18 @@ CREATE TABLE IF NOT EXISTS s2_signals (     -- сигналы перенапра
     direction   TEXT NOT NULL,
     symbol      TEXT NOT NULL,
     entry       TEXT,                       -- цена на момент отправки, NULL — цены не было
-    sl          TEXT NOT NULL,
-    tp          TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'open',  -- open / profit / stopped / archived
+    sl          TEXT NOT NULL,              -- текущий стоп (после переносов)
+    tp          TEXT NOT NULL,              -- '' — тейк открытый
+    status      TEXT NOT NULL DEFAULT 'open',  -- open / profit / stopped / closed / reentered / archived
     child_id    INTEGER,                    -- перезаход после стопа
     created_at  TEXT NOT NULL,
     UNIQUE (route_id, src_msg_id)
+);
+CREATE TABLE IF NOT EXISTS s2_links (       -- реплай на реплай: сообщение источника -> его сигнал
+    route_id    INTEGER NOT NULL,
+    src_msg_id  INTEGER NOT NULL,
+    signal_id   INTEGER NOT NULL,
+    PRIMARY KEY (route_id, src_msg_id)
 );
 """
 
@@ -78,6 +84,8 @@ class DB:
             self.conn.execute("ALTER TABLE routes ADD COLUMN rules TEXT NOT NULL DEFAULT 'standard'")
         if "header" not in cols:
             self.conn.execute("ALTER TABLE routes ADD COLUMN header TEXT NOT NULL DEFAULT ''")
+        if "sl0" not in {r[1] for r in self.conn.execute("PRAGMA table_info(s2_signals)")}:
+            self.conn.execute("ALTER TABLE s2_signals ADD COLUMN sl0 TEXT")  # стоп из сигнала, для расчёта 1R
         self.conn.commit()
 
     def _migrate_single_channel(self):
@@ -189,9 +197,10 @@ class DB:
                created_at) -> int:
         cur = self.conn.execute(
             "INSERT INTO s2_signals (route_id, src_msg_id, dst_chat, dst_msg_id, direction, symbol,"
-            " entry, sl, tp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " entry, sl, sl0, tp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (route_id, src_id, dst_chat, dst_id, direction, symbol,
-             None if entry is None else str(entry), str(sl), str(tp), created_at))
+             None if entry is None else str(entry), str(sl), str(sl), "" if tp is None else str(tp),
+             created_at))
         self.conn.commit()
         return cur.lastrowid
 
@@ -200,11 +209,22 @@ class DB:
                                  (route_id, src_id)).fetchone()
 
     def s2_latest(self, route_id, src_id):
-        """Сигнал по id исходного сообщения; после перезахода — его актуальная версия."""
+        """Сигнал по id сообщения источника (сам сигнал или любой ответ в его ветке);
+        после перезахода — его актуальная версия."""
         row = self.s2_by_src(route_id, src_id)
+        if row is None:
+            link = self.conn.execute("SELECT signal_id FROM s2_links WHERE route_id=? AND src_msg_id=?",
+                                     (route_id, src_id)).fetchone()
+            if link:
+                row = self.conn.execute("SELECT * FROM s2_signals WHERE id=?", (link[0],)).fetchone()
         while row and row["child_id"]:
             row = self.conn.execute("SELECT * FROM s2_signals WHERE id=?", (row["child_id"],)).fetchone()
         return row
+
+    def s2_link(self, route_id, src_id, signal_id):
+        self.conn.execute("INSERT OR IGNORE INTO s2_links (route_id, src_msg_id, signal_id) VALUES (?,?,?)",
+                          (route_id, src_id, signal_id))
+        self.conn.commit()
 
     def s2_open(self, route_id):
         return self.conn.execute("SELECT * FROM s2_signals WHERE route_id=? AND status='open' ORDER BY id",
