@@ -17,8 +17,9 @@ from . import config, prices
 from .botapi import BotAPI
 from .db import DB, RULES, row_signal, row_tps
 from .logic import (
-    CANCEL_TEXT, classify_reply, fmt_r, format_be, format_signal, format_stats,
-    format_stop, format_tp_change, format_tp_hit, parse_signal, ru_date, stop_result, summarize,
+    CANCEL_TEXT, ENTER_TEXT, REENTRY_TEXT, RISK_TEXT, classify_reply, fmt_r, format_be, format_signal,
+    format_stats, format_stop, format_tp_change, format_tp_hit, format_tp_update, parse_signal, ru_date,
+    stop_result, summarize,
 )
 from .source2 import Source2
 from .translate import Translator
@@ -62,6 +63,15 @@ def find_signal(route, msg, kind):
             sig = row_signal(row)
             if kind[1] <= sig.n and sig.tps[kind[1] - 1] == kind[2]:
                 return row
+    if kind[0] == "cancel":
+        # «🚨 Отменяем шорт 4085-4087» — сигнал с тем же направлением и диапазоном входа
+        side, nums = kind[1], sorted(kind[2])
+        for row in reversed(rows):
+            sig = row_signal(row)
+            if side and sig.direction != side:
+                continue
+            if not nums or [sig.entry_low, sig.entry_high] == [nums[0], nums[-1]]:
+                return row
     return rows[-1] if rows else None
 
 
@@ -95,6 +105,10 @@ async def process(route, msg):
     if not kind:
         return  # всё остальное (голосовые, фото, видео, болтовня) не копируем
     row = find_signal(route, msg, kind)
+    if row and kind[0] == "reentry" and row["status"] == "cancelled":
+        # «Перезаход. Активная сделка» по отменённому сигналу — он снова открыт
+        db.update_signal(row["id"], status="open", cancel_due=None)
+        row = db.by_src(route["id"], row["src_msg_id"])
     if not row or row["status"] != "open":
         log.info("ответ %s без открытого сигнала, пропуск (%s)", kind[0], route_name(route))
         return
@@ -103,6 +117,10 @@ async def process(route, msg):
 
     if kind[0] == "tp":
         idx = kind[1]
+        # автор иногда ошибается в номере («TP2 - 4358», а 4358 — это TP3): верим цене
+        by_price = [i for i, tp in enumerate(sig.tps, 1) if tp == kind[2] and i not in hits]
+        if by_price:
+            idx = by_price[0]
         if idx > sig.n or idx in hits:
             return
         hits.append(idx)
@@ -117,6 +135,23 @@ async def process(route, msg):
         sig.tps[idx - 1] = price  # R этого тейка дальше считается от новой цены
         await bot.send(chat, format_tp_change(idx, price), reply_to=reply_to)
         db.update_signal(row["id"], data=json.dumps(sig.to_dict()))
+    elif kind[0] == "tpupd":
+        changed = False
+        for idx, price in kind[1].items():
+            if idx <= sig.n and idx not in hits and sig.tps[idx - 1] != price:
+                sig.tps[idx - 1] = price
+                changed = True
+        if not changed:
+            return
+        await bot.send(chat, format_tp_update(sig), reply_to=reply_to)
+        db.update_signal(row["id"], data=json.dumps(sig.to_dict()))
+    elif kind[0] == "cancel":
+        await bot.send(chat, CANCEL_TEXT, reply_to=reply_to)
+        # без тейков — сделки не было; если тейки уже были, остаток просто закрыт
+        db.update_signal(row["id"], status="cancelled" if not hits else "closed", cancel_due=None)
+    elif kind[0] in ("reentry", "enter", "risk"):
+        text = {"reentry": REENTRY_TEXT, "enter": ENTER_TEXT, "risk": RISK_TEXT}[kind[0]]
+        await bot.send(chat, text, reply_to=reply_to)
     elif kind[0] == "be":
         if row["be_moved"]:
             return

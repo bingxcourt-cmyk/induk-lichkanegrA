@@ -195,17 +195,40 @@ def format_signal(sig: Signal) -> str:
 
 TP_CHANGE_RE = re.compile(r"(?:измени\w*|меняем|перенос\w*|move|change)\s+TP\s*(\d+)\s*(?:на|to)?\s*[:=\-–—]?\s*" + NUM, re.I)
 TP_HIT_RE = re.compile(r"\bTP\s*(\d+)\s*[-–—:]+\s*" + NUM, re.I)
-STOP_RE = re.compile(r"отстоп|стоп[\s-]*лосс\s+(?:сработал|выбило)|выбило\s+по\s+стоп|\bSL\s+hit\b|stopped\s+out", re.I)
+STOP_RE = re.compile(r"отстоп|стоп[\s-]*лосс\s+(?:сработал|выбило)|выбило\s+по\s+стоп|\bSL\s+hit\b|stopped\s+out"
+                     r"|достиг\w*[^\n]{0,25}стоп[\s-]*лосс", re.I)  # «Рынок достиг нашего стоп-лосса»
+CANCEL_RE = re.compile(r"отменяем\s+(шорт|лонг|сделк|ордер|позици)", re.I)
+ENTRY_MISS_RE = re.compile(r"\bentry\s+miss", re.I)
+REENTRY_RE = re.compile(r"перезаход", re.I)
+ENTER_RE = re.compile(r"^\W*заходим\s+сейчас", re.I)
+RISK_RE = re.compile(r"риск\w*\s+высок|высок\w*\s+риск|(?:занижайте|снижайте)\s+риск", re.I)
+TP_UPDATE_RE = re.compile(r"updating\s+the\s+TP|обновляем\s+(?:TP|тейк)", re.I)
 BE_RE = re.compile(r"безубыт|\bБУ\b|breakeven|break\s*even", re.I)
 
 
 def classify_reply(text: str):
-    """Возвращает ('tp', idx, price) / ('chg', idx, price) / ('sl',) / ('be',) / None."""
+    """Возвращает ('tp', idx, price) / ('chg', idx, price) / ('tpupd', {idx: price}) / ('sl',) / ('be',) /
+    ('cancel', BUY|SELL|None, [уровни входа]) / ('reentry',) / ('enter',) / ('risk',) / None."""
     if not text:
         return None
     m = TP_CHANGE_RE.search(text)  # раньше тейка: "Измените TP3 - 4106" не должно стать "TP3 взят"
     if m:
         return ("chg", int(m.group(1)), D(m.group(2)))
+    if TP_UPDATE_RE.search(text):
+        tps = {}
+        for tm in TP_DEF_RE.finditer(text):
+            tps.setdefault(int(tm.group(1)), D(tm.group(2)))
+        if tps:
+            return ("tpupd", tps)
+    m = CANCEL_RE.search(text) or ENTRY_MISS_RE.search(text)
+    if m:
+        side = {"шорт": "SELL", "лонг": "BUY"}.get((m.group(1) if m.re is CANCEL_RE else "").lower())
+        rest = text[m.end():] if m.re is CANCEL_RE else ""
+        return ("cancel", side, [D(x) for x in re.findall(NUM, rest)[:2]])
+    if REENTRY_RE.search(text):
+        return ("reentry",)
+    if ENTER_RE.search(text):
+        return ("enter",)
     m = TP_HIT_RE.search(text)
     if m and not TP_DEF_RE.search(text.replace(m.group(0), "", 1)):
         return ("tp", int(m.group(1)), D(m.group(2)))
@@ -213,6 +236,8 @@ def classify_reply(text: str):
         return ("sl",)
     if BE_RE.search(text):
         return ("be",)
+    if RISK_RE.search(text):
+        return ("risk",)
     return None
 
 
@@ -223,6 +248,13 @@ def format_tp_hit(sig: Signal, idx: int) -> str:
 
 def format_tp_change(idx: int, price: Decimal) -> str:
     return f"🚨 меняем TP{idx} на {fmt_price(price)}"
+
+
+def format_tp_update(sig: Signal) -> str:
+    lines = ["🚨 обновляем тейк-профиты:", ""]
+    for i, tp in enumerate(sig.tps, 1):
+        lines.append(f"✅TP{i}: {fmt_price(tp)} {fmt_r(sig.tp_r(i))}")
+    return "\n".join(lines)
 
 
 def format_be(sig: Signal) -> str:
@@ -247,6 +279,9 @@ def format_stop(sig: Signal, tps_hit: int, be_moved: bool) -> str:
 
 
 CANCEL_TEXT = "отменяем ордера по этой позиции"
+REENTRY_TEXT = "🔁 перезаход: позиция снова активна"
+ENTER_TEXT = "✅ заходим в позицию сейчас"
+RISK_TEXT = "⚠️ очень высокий риск — снижайте риск на сделку максимально"
 
 
 # ------------------------------------------------------- статистика

@@ -52,4 +52,4 @@ systemctl stop signalbot; venv/bin/python -m signalbot.login; systemctl enable -
 ```
 Каналы выберите в боте командой /settings. Админ должен один раз нажать /start в боте, чтобы бот мог писать в личку.
 
-Проверка логики без Telegram: `python3 tests/test_flow.py` и `python3 tests/test_source2.py`
+Проверка логики без Telegram: `python3 tests/test_flow.py`, `python3 tests/test_rules1.py` и `python3 tests/test_source2.py`
