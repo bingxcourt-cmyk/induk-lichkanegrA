@@ -76,11 +76,10 @@ def format_signal(direction: str, symbol: str, entry, sl: Decimal, tp: Decimal,
         f"Вход {price2(entry)}" if entry is not None else "Вход по рынку",
         f"SL: {price2(sl)}",
         f"Takeprofit: {price2(tp)}",
-        "",
         f'в <a href="{BOT_LINK}">этом</a> боте отображено точное количество лотов, на которое '
         "нужно открыть позицию, дабы при стопе ты потерял ровно 1% от своего депозита",
     ]
-    return "\n".join(lines)
+    return "\n\n".join(lines)  # каждая строка — отдельным абзацем
 
 
 def profit_pct(entry: Decimal, sl: Decimal, price: Decimal, risk: Decimal = Decimal(1)) -> Decimal:

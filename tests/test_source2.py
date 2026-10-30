@@ -40,9 +40,9 @@ def test_classify():
 def test_format():
     s = parse_signal(SIGNAL)
     text = format_signal(s.direction, s.symbol, Decimal("4031.4"), s.sl, s.tp, "Заголовок <1>")
-    assert text == ("Заголовок &lt;1&gt;\n#GOLD LONG\nВход 4031.40\nSL: 4019.96\nTakeprofit: 4068.64\n\n" + LINK)
+    assert text == ("Заголовок &lt;1&gt;\n\n#GOLD LONG\n\nВход 4031.40\n\nSL: 4019.96\n\nTakeprofit: 4068.64\n\n" + LINK)
     short = format_signal("SELL", "XAUUSD", Decimal("4050.005"), Decimal("4080.5"), Decimal("4001.123"))
-    assert short.startswith("#GOLD SHORT\nВход 4050.01\nSL: 4080.50\nTakeprofit: 4001.12\n")
+    assert short.startswith("#GOLD SHORT\n\nВход 4050.01\n\nSL: 4080.50\n\nTakeprofit: 4001.12\n\n")
     assert "Вход по рынку" in format_signal("BUY", "XAUUSD", None, s.sl, s.tp)
 
 
@@ -116,10 +116,10 @@ def test_flow():
 
     assert [(c, r) for c, r, _ in bot.sent] == [(-1002, None), (-1002, 101), (-1002, 101),
                                                  (-1002, None), (-1002, 104)], bot.sent
-    assert bot.sent[0][2].startswith("ЗАГОЛОВОК\n#GOLD LONG\nВход 4031.40\nSL: 4019.96\nTakeprofit: 4068.64")
+    assert bot.sent[0][2].startswith("ЗАГОЛОВОК\n\n#GOLD LONG\n\nВход 4031.40\n\nSL: 4019.96\n\nTakeprofit: 4068.64")
     assert bot.sent[1][2] == "держим покупки"
     assert bot.sent[2][2] == STOP_TEXT
-    assert bot.sent[3][2].startswith("ЗАГОЛОВОК\n#GOLD LONG\nВход 4010.00\nSL: 4019.96\nTakeprofit: 4068.64")
+    assert bot.sent[3][2].startswith("ЗАГОЛОВОК\n\n#GOLD LONG\n\nВход 4010.00\n\nSL: 4019.96\n\nTakeprofit: 4068.64")
     # вход 4010, SL 4019.957: риск 9.957, прибыль 30 -> 3.01%
     assert bot.sent[4][2] == "закрываем сделку в профит по текущей цене. +3.01% к депозиту"
     row = db.s2_by_src(route["id"], 3)
@@ -139,7 +139,7 @@ def test_no_price():
         await s2.handle(route, Msg(2, "Close off profits", 1))
     asyncio.run(run())
     targets = [m for m in bot.sent if m[0] == -1002]
-    assert targets[0][2].startswith("#GOLD LONG\nВход по рынку\n")
+    assert targets[0][2].startswith("#GOLD LONG\n\nВход по рынку\n\n")
     assert targets[1][2] == "закрываем сделку в профит по текущей цене."
     assert any(m[0] == 7 for m in bot.sent)  # админ предупреждён
 
