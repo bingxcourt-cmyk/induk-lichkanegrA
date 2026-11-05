@@ -562,11 +562,33 @@ async def apply_channel(chat, kind: str, rid: str, ref):
     return route_screen(route["id"], "✅ Канал публикации заменён")
 
 
-def indicator_menu():
+def indicator_symbol(chat):
+    return db.get(f"indicator_symbol:{chat}", "ALL")
+
+
+def indicator_instruments():
+    known = {r[0] for r in db.conn.execute(
+        "SELECT DISTINCT symbol FROM indicator_messages WHERE channel=? AND kind='signal'", (indicator.channel,))}
+    return ["ALL", "GOLD", "GER40"] + sorted(known - {"", "GOLD", "GER40"})
+
+
+def instrument_name(symbol):
+    return {"ALL": "Все инструменты", "GOLD": "Золото", "GER40": "Германия"}.get(symbol, symbol)
+
+
+def instrument_buttons(selected, prefix):
+    buttons = [(("✅ " if sym == selected else "") + instrument_name(sym), f"{prefix}:{sym}")
+               for sym in indicator_instruments()]
+    return [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+
+
+def indicator_menu(chat=None):
     return ("📊 Индикатор #1 · Aurum Research Club\n\n"
             "Каждый TP — +1% на всю позицию, стоп — −1%.\n"
             "7 стратегий фиксации, без переноса стопа в БУ.\n"
-            "День закрывается в 22:00 МСК. Выберите период:", keyboard([
+            f"Инструмент: {instrument_name(indicator_symbol(chat))}\n"
+            "День закрывается в 22:00 МСК. Выберите инструмент и период:", keyboard(
+        instrument_buttons(indicator_symbol(chat), "ind:symbol") + [
         [("Сегодня", "ind:today"), ("Вчера", "ind:yesterday")],
         [("Неделя", "ind:week"), ("Месяц", "ind:month")],
         [("За всё время", "ind:all"), ("Выбрать период", "ind:period")],
@@ -577,13 +599,28 @@ def indicator_menu():
 async def indicator_callback(action, chat, mid):
     pending.pop(chat, None)
     today = now().astimezone(MSK).date()
+    if action.startswith("symbol:"):
+        sym = action.split(":", 1)[1]
+        if sym not in indicator_instruments():
+            return
+        db.set(f"indicator_symbol:{chat}", sym)
+        return await bot.edit(chat, mid, *indicator_menu(chat))
+    if action.startswith("filter:"):
+        _, first, last, sym = action.split(":")
+        if sym not in indicator_instruments():
+            return
+        db.set(f"indicator_symbol:{chat}", sym)
+        a, b = (datetime.strptime(x, "%Y%m%d").date() for x in (first, last))
+        return await send_indicator_report(chat, a, b, sym)
     if action.startswith("list:"):
-        _, first, last, offset = action.split(":")
+        parts = action.split(":")
+        _, first, last, offset = parts[:4]
+        sym = parts[4] if len(parts) == 5 else indicator_symbol(chat)
         a, b = (datetime.strptime(x, "%Y%m%d").date() for x in (first, last))
         offset = max(0, int(offset))
         trades, _ = indicator.trades(now().astimezone(MSK))
-        trades = sorted((s for s in trades if a <= s["day"] <= b), key=lambda s: s["stamp"], reverse=True)
-        lines = [f"Индикатор #1: сигналы {a:%d.%m.%Y}–{b:%d.%m.%Y}", ""]
+        trades = sorted((s for s in trades if a <= s["day"] <= b and (sym == "ALL" or s["symbol"] == sym)), key=lambda s: s["stamp"], reverse=True)
+        lines = [f"Индикатор #1: сигналы {a:%d.%m.%Y}–{b:%d.%m.%Y}", instrument_name(sym), ""]
         for t in trades[offset:offset+12]:
             stamp = datetime.fromisoformat(t["stamp"])
             state = "завершён" if t["finished"] else "ожидает 22:00 / стопа / TP4"
@@ -594,14 +631,14 @@ async def indicator_callback(action, chat, mid):
             lines.append("Сигналов за этот период нет.")
         nav = []
         if offset:
-            nav.append(("« Предыдущие", f"ind:list:{first}:{last}:{max(0,offset-12)}"))
+            nav.append(("« Предыдущие", f"ind:list:{first}:{last}:{max(0,offset-12)}:{sym}"))
         if len(trades) > offset+12:
-            nav.append(("Следующие »", f"ind:list:{first}:{last}:{offset+12}"))
+            nav.append(("Следующие »", f"ind:list:{first}:{last}:{offset+12}:{sym}"))
         return await bot.send(chat, "\n".join(lines), markup=keyboard([nav] if nav else []))
     if action == "menu":
-        return await bot.edit(chat, mid, *indicator_menu())
+        return await bot.edit(chat, mid, *indicator_menu(chat))
     if action == "period":
-        pending[chat] = ("indicatorperiod", "")
+        pending[chat] = ("indicatorperiod", indicator_symbol(chat))
         return await bot.send(chat, "Пришлите начальную и конечную даты: 01.10.2026 05.11.2026")
     a, b = today, today
     if action == "yesterday":
@@ -619,9 +656,11 @@ async def indicator_callback(action, chat, mid):
     return await send_indicator_report(chat, a, b)
 
 
-async def send_indicator_report(chat, a, b):
-    return await bot.send(chat, indicator.report(a, b), markup=keyboard([
-        [("Сигналы за этот период", f"ind:list:{a:%Y%m%d}:{b:%Y%m%d}:0")],
+async def send_indicator_report(chat, a, b, symbol=None):
+    sym = symbol or indicator_symbol(chat)
+    return await bot.send(chat, indicator.report(a, b, symbol=None if sym == "ALL" else sym), markup=keyboard(
+        instrument_buttons(sym, f"ind:filter:{a:%Y%m%d}:{b:%Y%m%d}") + [
+        [("Сигналы за этот период", f"ind:list:{a:%Y%m%d}:{b:%Y%m%d}:0:{sym}")],
         [("« Выбрать период", "ind:menu")],
     ]))
 
@@ -711,16 +750,17 @@ async def on_admin_message(msg):
     if pending.get(chat, ("",))[0] == "indicatorperiod" and text and not text.startswith("/"):
         try:
             a, b = sorted(parse_day(x) for x in text.split())
-            report_text = indicator.report(a, b)
+            sym = pending[chat][1]
+            indicator.report(a, b, symbol=None if sym == "ALL" else sym)
         except (ValueError, TypeError):
             return await bot.send(chat, "Пришлите две даты: 01.10.2026 05.11.2026")
         pending.pop(chat, None)
-        return await send_indicator_report(chat, a, b)
+        return await send_indicator_report(chat, a, b, sym)
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
         if cmd == "/indicator" and len(text.split()) == 1:
             pending.pop(chat, None)
-            return await send_screen(chat, indicator_menu())
+            return await send_screen(chat, indicator_menu(chat))
         pending.pop(chat, None)
         if cmd == "/indicator" and len(text.split()) == 3:
             try:

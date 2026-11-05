@@ -57,6 +57,23 @@ class TestIndicator(unittest.TestCase):
         self.assertEqual(trades[0]['max_tp'],2);self.assertEqual(len(unmatched),1)
         self.msg(3,TP.format(1,1),12,2)
         self.assertEqual(self.book.trades(datetime(2026,11,5,18,tzinfo=MSK))[0][0]['max_tp'],1)
+    def test_instrument_filter(self):
+        self.msg(1, SIGNAL)
+        self.msg(2, SIGNAL.replace('GOLD', 'GER40'))
+        self.msg(3, TP.format(2, 2), 11, 1)
+        self.msg(4, TP.format(1, 1).replace('GOLD', 'GER40'), 12, 2)
+        at = datetime(2026, 11, 5, 22, tzinfo=MSK)
+        a = date(2026, 11, 5)
+        gold = self.book.report(a, a, at, symbol='GOLD')
+        germany = self.book.report(a, a, at, symbol='GER40')
+        all_symbols = self.book.report(a, a, at)
+        self.assertIn('Сигналов: 1', gold)
+        self.assertIn('втором тейке = +2%', gold)
+        self.assertIn('втором тейке = -1%', germany)
+        self.assertIn('втором тейке = +1%', all_symbols)
+        self.assertIn('Германия (GER40)', germany)
+        self.assertIn('Сигналов: 0', self.book.report(a, a, at, symbol='SILVER'))
+
     def test_period_is_signal_date(self):
         self.msg(1,SIGNAL,day=4);self.msg(2,TP.format(4,4),11,1,day=5)
         report=self.book.report(date(2026,11,4),date(2026,11,4),datetime(2026,11,5,15,tzinfo=MSK))

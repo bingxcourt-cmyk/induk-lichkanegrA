@@ -154,7 +154,8 @@ class Indicator:
         waiting = len(chosen) - len(closed)
         title = 'твердая стата по индюку #1 за сегодня:' if start == end == at.date() else (
             f'твердая стата по индюку #1 за {start:%d.%m.%Y}–{end:%d.%m.%Y}:')
-        lines = [title, '', f'Сигналов: {len(chosen)} · завершено: {len(closed)} · ожидают: {waiting}']
+        scope = {'GOLD': 'Золото (GOLD)', 'GER40': 'Германия (GER40)'}.get(symbol, symbol or 'Все инструменты')
+        lines = [title, scope, '', f'Сигналов: {len(chosen)} · завершено: {len(closed)} · ожидают: {waiting}']
         lines += ['Максимальный TP: ' + ' · '.join(f'TP{i}: {sum(s["max_tp"] == i for s in closed)}' for i in range(1, 5)),
                   f'Без тейков: {sum(s["max_tp"] == 0 for s in closed)}', '']
         for label, weights in STRATEGIES:
@@ -168,7 +169,8 @@ class Indicator:
             lines += ['⏳ История ещё загружается — результат предварительный.']
         if self.error:
             lines += [f'⚠️ {self.error}']
-        missing = sum(start <= datetime.fromisoformat(r['stamp']).date() <= end for r in unmatched)
+        missing = sum(start <= datetime.fromisoformat(r['stamp']).date() <= end
+                      and (symbol is None or r['symbol'] == symbol) for r in unmatched)
         if missing:
             lines += [f'Отдельно: {missing} сообщений о результате за период без привязки к сигналу; в расчёт не включены.']
         return '\n'.join(lines)
