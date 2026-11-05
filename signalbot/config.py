@@ -61,3 +61,6 @@ DB_PATH = str(BASE / "data" / "bot.db")
 CTRADER_TOKEN_FILE = str(BASE / "data" / "ctrader_token.json")  # обновлённые токены cTrader
 
 (BASE / "data").mkdir(exist_ok=True)
+
+# Отдельная статистика индикатора #1 (Aurum Research Club)
+INDICATOR_CHANNEL = int(os.environ.get("INDICATOR_CHANNEL") or "-1003978977082")

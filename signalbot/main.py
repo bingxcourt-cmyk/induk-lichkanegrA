@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, utils
 
 from . import config, prices
+from .indicator import Indicator, MSK
 from .botapi import BotAPI
 from .db import DB, RULES, row_signal, row_tps
 from .logic import (
@@ -30,6 +31,7 @@ log = logging.getLogger("signalbot")
 TZ = ZoneInfo(config.TZ)
 db = DB(config.DB_PATH)
 bot = BotAPI(config.BOT_TOKEN)
+indicator = Indicator(db, config.INDICATOR_CHANNEL)
 lock = asyncio.Lock()
 user = None        # TelegramClient аккаунта-читателя (None, если не авторизован)
 sources = set()    # ID каналов-источников активных перенаправлений
@@ -281,10 +283,13 @@ HELP = (
     "/week — с понедельника по сегодня\n"
     "/month — текущий месяц (или /month 09.2026)\n"
     "/period 01.10.2026 26.10.2026 — за выбранный период\n"
-    "/open — открытые сигналы"
+    "/open — открытые сигналы\n"
+    "/indicator — индикатор #1: статистика и стратегии\n"
+    "/indicator 01.10.2026 05.11.2026 — индикатор за период"
 )
 
 COMMANDS = [
+    ("indicator", "📊 индикатор #1: статистика и стратегии"),
     ("settings", "⚙️ перенаправления: откуда и куда"),
     ("today", "статистика за сегодня"),
     ("week", "статистика за неделю"),
@@ -302,6 +307,11 @@ def admin_command(text: str) -> str:
     parts = text.split()
     cmd = parts[0].split("@")[0].lower()
     today = now().date()
+    if cmd == "/indicator":
+        a, b = sorted([parse_day(parts[1]), parse_day(parts[2])]) if len(parts) == 3 else (today, today)
+        if len(parts) not in (1, 3):
+            return "Формат: /indicator 01.10.2026 05.11.2026"
+        return indicator.report(a, b)
     if cmd == "/today":
         return admin_report(today, today, f"торговая сессия {ru_date(today)}:", "итог дня")
     if cmd == "/week":
@@ -366,7 +376,7 @@ def panel(note: str = ""):
         lines += ["", "⚠️ Аккаунт-читатель не авторизован: на сервере запустите\n"
                       "cd /opt/signalbot && venv/bin/python -m signalbot.login"]
     rows = [[(f"{i}. {route_name(r)}"[:60], f"r:{r['id']}")] for i, r in enumerate(routes, 1)]
-    rows += [[("➕ Добавить перенаправление", "pick:src:new")], STATS_ROW, [("🔄 Обновить", "panel")]]
+    rows += [[("📊 Индикатор #1", "ind:menu")], [("➕ Добавить перенаправление", "pick:src:new")], STATS_ROW, [("🔄 Обновить", "panel")]]
     return "\n".join(lines), keyboard(rows)
 
 
@@ -552,12 +562,92 @@ async def apply_channel(chat, kind: str, rid: str, ref):
     return route_screen(route["id"], "✅ Канал публикации заменён")
 
 
+def indicator_menu():
+    return ("📊 Индикатор #1 · Aurum Research Club\n\n"
+            "Каждый TP — +1% на всю позицию, стоп — −1%.\n"
+            "7 стратегий фиксации, без переноса стопа в БУ.\n"
+            "День закрывается в 22:00 МСК. Выберите период:", keyboard([
+        [("Сегодня", "ind:today"), ("Вчера", "ind:yesterday")],
+        [("Неделя", "ind:week"), ("Месяц", "ind:month")],
+        [("За всё время", "ind:all"), ("Выбрать период", "ind:period")],
+        [("« В меню", "panel")],
+    ]))
+
+
+async def indicator_callback(action, chat, mid):
+    pending.pop(chat, None)
+    today = now().astimezone(MSK).date()
+    if action.startswith("list:"):
+        _, first, last, offset = action.split(":")
+        a, b = (datetime.strptime(x, "%Y%m%d").date() for x in (first, last))
+        offset = max(0, int(offset))
+        trades, _ = indicator.trades(now().astimezone(MSK))
+        trades = sorted((s for s in trades if a <= s["day"] <= b), key=lambda s: s["stamp"], reverse=True)
+        lines = [f"Индикатор #1: сигналы {a:%d.%m.%Y}–{b:%d.%m.%Y}", ""]
+        for t in trades[offset:offset+12]:
+            stamp = datetime.fromisoformat(t["stamp"])
+            state = "завершён" if t["finished"] else "ожидает 22:00 / стопа / TP4"
+            result = f"TP{t['max_tp']}" if t["max_tp"] else "без тейков"
+            lines += [f"{stamp:%d.%m %H:%M} {t['symbol']} {t['side']} — {result}, {state}",
+                      f"https://t.me/c/{str(abs(indicator.channel))[3:]}/{t['msg_id']}", ""]
+        if not trades:
+            lines.append("Сигналов за этот период нет.")
+        nav = []
+        if offset:
+            nav.append(("« Предыдущие", f"ind:list:{first}:{last}:{max(0,offset-12)}"))
+        if len(trades) > offset+12:
+            nav.append(("Следующие »", f"ind:list:{first}:{last}:{offset+12}"))
+        return await bot.send(chat, "\n".join(lines), markup=keyboard([nav] if nav else []))
+    if action == "menu":
+        return await bot.edit(chat, mid, *indicator_menu())
+    if action == "period":
+        pending[chat] = ("indicatorperiod", "")
+        return await bot.send(chat, "Пришлите начальную и конечную даты: 01.10.2026 05.11.2026")
+    a, b = today, today
+    if action == "yesterday":
+        a = b = today - timedelta(days=1)
+    elif action == "week":
+        a = today - timedelta(days=today.weekday())
+    elif action == "month":
+        a = today.replace(day=1)
+    elif action == "all":
+        first = db.conn.execute("SELECT MIN(stamp) FROM indicator_messages WHERE channel=? AND kind='signal'",
+                                (indicator.channel,)).fetchone()[0]
+        a = datetime.fromisoformat(first).date() if first else today
+    elif action != "today":
+        return
+    return await send_indicator_report(chat, a, b)
+
+
+async def send_indicator_report(chat, a, b):
+    return await bot.send(chat, indicator.report(a, b), markup=keyboard([
+        [("Сигналы за этот период", f"ind:list:{a:%Y%m%d}:{b:%Y%m%d}:0")],
+        [("« Выбрать период", "ind:menu")],
+    ]))
+
+
+async def indicator_daily():
+    await indicator.ready.wait()
+    while True:
+        try:
+            t = now().astimezone(MSK)
+            key = "indicator_daily:" + str(indicator.channel)
+            if t.hour >= 22 and db.get(key) != t.date().isoformat() and not indicator.error:
+                await bot.send(config.ADMIN_ID, indicator.report(t.date(), t.date(), t))
+                db.set(key, t.date().isoformat())
+        except Exception:
+            log.exception("индикатор #1: итоги дня")
+        await asyncio.sleep(20)
+
+
 async def on_callback(cq):
     if cq.get("from", {}).get("id") != config.ADMIN_ID or "message" not in cq:
         return await bot.answer(cq["id"])
     data, chat, mid = cq.get("data", ""), cq["message"]["chat"]["id"], cq["message"]["message_id"]
     await bot.answer(cq["id"])
     screen = None
+    if data.startswith("ind:"):
+        return await indicator_callback(data[4:], chat, mid)
     if data == "panel":
         pending.pop(chat, None)
         drafts.pop(chat, None)
@@ -618,9 +708,26 @@ async def on_admin_message(msg):
         header = "" if text.strip() == "/clear" else text.strip()
         db.update_route(rid, header=header)
         return await send_screen(chat, route_screen(rid, "✅ Заголовок сохранён" if header else "✅ Заголовок убран"))
+    if pending.get(chat, ("",))[0] == "indicatorperiod" and text and not text.startswith("/"):
+        try:
+            a, b = sorted(parse_day(x) for x in text.split())
+            report_text = indicator.report(a, b)
+        except (ValueError, TypeError):
+            return await bot.send(chat, "Пришлите две даты: 01.10.2026 05.11.2026")
+        pending.pop(chat, None)
+        return await send_indicator_report(chat, a, b)
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
+        if cmd == "/indicator" and len(text.split()) == 1:
+            pending.pop(chat, None)
+            return await send_screen(chat, indicator_menu())
         pending.pop(chat, None)
+        if cmd == "/indicator" and len(text.split()) == 3:
+            try:
+                a, b = sorted(parse_day(x) for x in text.split()[1:])
+            except ValueError:
+                return await bot.send(chat, "Формат: /indicator 01.10.2026 05.11.2026")
+            return await send_indicator_report(chat, a, b)
         if cmd in ("/start", "/settings", "/menu"):
             if cmd == "/start":
                 await set_commands()
@@ -708,19 +815,28 @@ async def main():
 
     if user is not None:
         # без фильтра chats=, чтобы перенаправления можно было менять в боте без перезапуска
-        @user.on(events.NewMessage(func=lambda e: e.chat_id in sources))
+        @user.on(events.NewMessage(func=lambda e: e.chat_id in sources or e.chat_id == indicator.channel))
         async def on_new(event):
             async with lock:
-                await handle_new(event.chat_id, event.message)
+                if event.chat_id == indicator.channel:
+                    indicator.ingest(event.message)
+                if event.chat_id in sources:
+                    await handle_new(event.chat_id, event.message)
 
-        @user.on(events.MessageEdited(func=lambda e: e.chat_id in sources))
+        @user.on(events.MessageEdited(func=lambda e: e.chat_id in sources or e.chat_id == indicator.channel))
         async def on_edit(event):
             async with lock:
                 try:
-                    await handle_edit(event.chat_id, event.message)
+                    if event.chat_id == indicator.channel:
+                        indicator.ingest(event.message)
+                    if event.chat_id in sources:
+                        await handle_edit(event.chat_id, event.message)
                 except Exception:
                     log.exception("ошибка обработки правки %s", event.message.id)
 
+    if user is not None:
+        asyncio.create_task(indicator.sync(user))
+        asyncio.create_task(indicator_daily())
     asyncio.create_task(scheduler())
     if user is None:
         await admin_loop()
