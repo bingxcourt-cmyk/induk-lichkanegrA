@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import re
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from telethon import TelegramClient, events, utils
 
 from . import config, prices
 from .indicator import Indicator, MSK
+from .retra import Retra
 from .botapi import BotAPI
 from .db import DB, RULES, row_signal, row_tps
 from .logic import (
@@ -32,6 +34,7 @@ TZ = ZoneInfo(config.TZ)
 db = DB(config.DB_PATH)
 bot = BotAPI(config.BOT_TOKEN)
 indicator = Indicator(db, config.INDICATOR_CHANNEL)
+retra = Retra(bot, db)
 lock = asyncio.Lock()
 user = None        # TelegramClient аккаунта-читателя (None, если не авторизован)
 sources = set()    # ID каналов-источников активных перенаправлений
@@ -877,6 +880,54 @@ async def main():
     if user is not None:
         asyncio.create_task(indicator.sync(user))
         asyncio.create_task(indicator_daily())
+    if Path(config.RETRA_SESSION + ".session").exists():
+        reader = TelegramClient(config.RETRA_SESSION, config.RETRA_API_ID, config.RETRA_API_HASH)
+        await reader.connect()
+        if await reader.is_user_authorized():
+            await reader.get_dialogs()
+
+            async def on_retra(event, edited=False):
+                async with lock:
+                    for route in db.routes():
+                        if route["source"] == config.RETRA_CHANNEL and route["rules"] == "retra":
+                            try:
+                                await retra.handle(route, event.message, reader, edited=edited)
+                                if not edited:
+                                    key = f"retra_cursor:{route['id']}"
+                                    db.set(key, max(int(db.get(key, 0)), event.message.id))
+                            except Exception:
+                                log.exception("ретра: сообщение %s", event.message.id)
+
+            reader.add_event_handler(on_retra, events.NewMessage(chats=config.RETRA_CHANNEL))
+
+            async def on_retra_edit(event):
+                await on_retra(event, edited=True)
+
+            reader.add_event_handler(on_retra_edit, events.MessageEdited(chats=config.RETRA_CHANNEL))
+            # Fill gaps while the service was stopped. Mapping prevents duplicate posts.
+            async def catch_up_retra():
+                async with lock:
+                    for route in db.routes():
+                        if route["source"] != config.RETRA_CHANNEL or route["rules"] != "retra":
+                            continue
+                        key = f"retra_cursor:{route['id']}"
+                        cursor = db.get(key)
+                        if cursor is None:
+                            latest = await reader.get_messages(config.RETRA_CHANNEL, limit=1)
+                            db.set(key, latest[0].id if latest else 0)
+                            continue
+                        async for msg in reader.iter_messages(config.RETRA_CHANNEL, min_id=int(cursor), reverse=True):
+                            try:
+                                await retra.handle(route, msg, reader)
+                                db.set(key, max(int(db.get(key, 0)), msg.id))
+                            except Exception:
+                                log.exception("ретра: догрузка сообщения %s", msg.id)
+                                break
+            asyncio.create_task(catch_up_retra())
+            log.info("ретра: читатель подключён, фильтр только XAUUSD")
+        else:
+            log.error("ретра: аккаунт не авторизован")
+            await reader.disconnect()
     asyncio.create_task(scheduler())
     if user is None:
         await admin_loop()

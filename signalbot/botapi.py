@@ -1,6 +1,7 @@
 """Минимальный клиент Telegram Bot API: отправка постов и команды админа."""
 import asyncio
 import logging
+import json
 
 import aiohttp
 
@@ -37,13 +38,37 @@ class BotAPI:
         return await self._call(method, **params)
 
     async def send(self, chat_id, text: str, reply_to: int = None, markup: dict = None,
-                   html: bool = False) -> int:
+                   html: bool = False, strict_reply: bool = False) -> int:
         params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True,
                   "reply_markup": markup, "parse_mode": "HTML" if html else None}
         if reply_to:
-            params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+            params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": not strict_reply}
         msg = await self._call("sendMessage", **params)
         return msg["message_id"]
+
+    async def send_photo(self, chat_id, photo: bytes, caption: str, reply_to=None) -> int:
+        if len(caption) > 1024:
+            raise ValueError("Подпись к фото длиннее 1024 символов")
+        if self.session is None:
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=70))
+        for attempt in range(5):
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            form.add_field("caption", caption)
+            form.add_field("parse_mode", "HTML")
+            if reply_to:
+                form.add_field("reply_parameters", json.dumps({"message_id":reply_to}))
+            form.add_field("photo", photo, filename="signal.jpg", content_type="image/jpeg")
+            async with self.session.post(self.url + "sendPhoto", data=form) as response:
+                data = await response.json()
+            if data.get("ok"):
+                return data["result"]["message_id"]
+            retry = data.get("parameters", {}).get("retry_after")
+            if retry:
+                await asyncio.sleep(retry + 1)
+                continue
+            raise RuntimeError(f"sendPhoto: {data.get('description')}")
+        raise RuntimeError("sendPhoto: не удалось после повторов")
 
     async def edit(self, chat_id, message_id: int, text: str, markup: dict = None):
         try:

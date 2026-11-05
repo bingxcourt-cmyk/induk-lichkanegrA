@@ -64,3 +64,9 @@ CTRADER_TOKEN_FILE = str(BASE / "data" / "ctrader_token.json")  # обновлё
 
 # Отдельная статистика индикатора #1 (Aurum Research Club)
 INDICATOR_CHANNEL = int(os.environ.get("INDICATOR_CHANNEL") or "-1003978977082")
+
+# Читатель канала «под ретру», перенесённый из старого приложения
+RETRA_CHANNEL = int(os.environ.get("RETRA_CHANNEL") or "-1004315849388")
+RETRA_API_ID = int(os.environ.get("RETRA_API_ID") or API_ID)
+RETRA_API_HASH = os.environ.get("RETRA_API_HASH") or API_HASH
+RETRA_SESSION = str(BASE / "data" / "retra")

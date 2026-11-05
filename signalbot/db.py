@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS s2_links (       -- реплай на реплай: �
 RULES = {
     "standard": "Стандарт (источник 1)",
     "forexbulls": "Forex Bulls (источник 2)",
+    "retra": "Индикатор #1 · XAUUSD из ретры",
     "stub": "Заглушка (источник 3)",
 }
 
