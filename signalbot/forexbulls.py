@@ -15,9 +15,10 @@ BOT_LINK = "https://t.me/delaydengizdravo_bot"
 
 # инструменты канала: XAUUSD/GOLD, XAGUSD/SILVER, валютные пары и их сокращения («GJ» — GBPJPY)
 SYMBOL_RE = re.compile(r"\b(XAUUSD|XAU|GOLD|XAGUSD|XAG|SILVER|(?:USD|EUR|GBP|AUD|NZD|CAD|CHF)"
-                       r"(?:USD|JPY|GBP|EUR|CHF|CAD|AUD|NZD)|GJ|GU|EU|UJ|US30|NAS100|BTCUSD)\b", re.I)
+                       r"(?:USD|JPY|GBP|EUR|CHF|CAD|AUD|NZD)|GJ|GU|EU|UJ|USOIL|UKOIL|WTI|BRENT|XTIUSD|XBRUSD|US30|US100|NAS100|USTEC|GER40|DE40|SPX500|SP500|BTCUSD|ETHUSD)\b", re.I)
 ALIASES = {"XAU": "XAUUSD", "GOLD": "XAUUSD", "XAG": "XAGUSD", "SILVER": "XAGUSD",
-           "GJ": "GBPJPY", "GU": "GBPUSD", "EU": "EURUSD", "UJ": "USDJPY"}
+           "GJ": "GBPJPY", "GU": "GBPUSD", "EU": "EURUSD", "UJ": "USDJPY",
+           "WTI": "USOIL", "WTIUSD": "USOIL", "XTIUSD": "USOIL", "BRENT": "UKOIL", "XBRUSD": "UKOIL"}
 DISPLAY = {"XAUUSD": "GOLD", "XAGUSD": "SILVER"}
 DIR_RE = re.compile(r"\b(buys?|sells?)\b", re.I)
 SIDE_RE = re.compile(r"\b(long|short)\b(?!\s+term)", re.I)  # «short term buys» — это покупки
@@ -57,12 +58,26 @@ class Signal2:
     tp: Optional[Decimal]   # None — тейк открытый
 
 
+# An explicit ticker next to BUY/SELL supports new instruments without guessing GOLD.
+TICKER_AFTER = re.compile(r"\b(?:buys?|sells?)\b[ \t]+(?:on[ \t]+)?[# $]*([A-Z][A-Z0-9]*(?:[./_-][A-Z0-9]+)?)\b", re.I)
+NOT_TICKERS = {"NOW", "AGAIN", "RE", "REENTRY", "ENTRY", "SL", "TP", "STOP", "LOSS", "SAME", "THE",
+               "SETUP", "VALID", "SHORTLY", "COMING", "INCOMING", "TODAY", "TOMORROW", "AND", "ARE", "IS",
+               "STOPLOSS", "STOPS", "AS", "IN", "ON", "TO", "OF", "IF", "BY", "BE", "LONG", "SHORT", "TRADE", "PROFIT", "PROFITS", "POSITIONS", "POSITION", "WITH", "AT", "FOR", "HERE", "CURRENT"}
+
+
 def symbol_of(text: str):
-    """Первый инструмент в тексте (XAUUSD, GBPJPY…) или None."""
-    m = SYMBOL_RE.search(text or "")
+    """Explicit ticker; unknown means unknown, never automatically gold."""
+    text = text or ""
+    m = TICKER_AFTER.search(text)
+    if m:
+        token = m[1].upper()
+        if token not in NOT_TICKERS and (m[1].isupper() or SYMBOL_RE.fullmatch(token) or '/' in token):
+            token = token.replace('/', '').replace('.', '').replace('_', '').replace('-', '')
+            return ALIASES.get(token, token)
+    m = SYMBOL_RE.search(text)
     if not m:
         return None
-    sym = m.group(1).upper()
+    sym = m[1].upper()
     return ALIASES.get(sym, sym)
 
 
@@ -84,8 +99,8 @@ def levels(text: str):
             D(tp.group(1)) if tp and not TP_OPEN_RE.search(text) else None)
 
 
-def parse_signal(text: str):
-    """Новый сигнал: направление и SL обязательны, TP может быть открытым; без инструмента — золото.
+def parse_signal(text: str, default_symbol=None):
+    """Новый сигнал: направление и SL обязательны, TP может быть открытым; без инструмента новый сигнал не публикуется (в реплае можно наследовать инструмент).
 
     «BUY XAUUSD / SL 4019.957 / TP 4068.642», «SELLS ON XAUUSD. SL … TP …», «XAUUSD BUYS SL …»,
     «Let’s buy XAUUSD Stop loss … Take profit; …», «Sell XAUUSD SL … TP open».
@@ -96,7 +111,10 @@ def parse_signal(text: str):
     sl, tp = levels(text)
     if not direction or sl is None:
         return None
-    return Signal2(direction, symbol_of(text) or "XAUUSD", sl, tp)
+    symbol = symbol_of(text) or default_symbol
+    if not symbol:
+        return None
+    return Signal2(direction, symbol, sl, tp)
 
 
 def classify_reply(text: str):

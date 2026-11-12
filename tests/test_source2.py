@@ -32,7 +32,6 @@ def test_parse():
         "Short term buys on XAUUSD \nSL 4023.17\nTP 4035.12": ("BUY", "4023.17", "4035.12"),
         "xauusd sells\nsl 4070.63\n\nensure proper risk managment": ("SELL", "4070.63", None),
         "Buy gold\nSL 4351.687\n\nEnsure proper risk management": ("BUY", "4351.687", None),
-        "PPI NEWS COMING UP SOON.\n\nExpecting sells\n\nStoploss 4160.576\nTP 4118.976": ("SELL", "4160.576", "4118.976"),
     }
     for text, (d, sl, tp) in cases.items():
         s = parse_signal(text)
@@ -45,7 +44,9 @@ def test_parse():
     assert parse_signal("GBPJPY buys.\n\nSL 216.622\nTP 217.195").symbol == "GBPJPY"
     for junk in ("HELLO TEAM", "BUY XAUUSD AGAIN NOW", "Close off profits", "", "BUY XAUUSD",
                  "Recovery setup 📈\n\nBUY XAGUSD (SILVER)\nSP 68.99489\nTP 69.96029",
-                 "Expecting sells on XAUUSD", "BUY 4018.76\n\nTP 4100.88"):
+                 "Expecting sells on XAUUSD", "BUY 4018.76\n\nTP 4100.88",
+                 "PPI NEWS COMING UP SOON.\nExpecting sells\nStoploss 4160.576\nTP 4118.976",
+                 "SELL NOW\nSL 86.52\nTP 83.87"):
         assert parse_signal(junk) is None, junk
 
 
@@ -211,6 +212,47 @@ def test_threads_and_updates():
         (106, "#GOLD LONG"),
         (107, "🔥 тейк-профит взят. +2% к депозиту"),  # перезаход по 4015, SL 4005, тейк по цене 4035
     ], texts
+
+
+def test_non_gold_regression():
+    from signalbot.forexbulls import symbol_of
+    for name in ("USOIL", "UKOIL", "US30", "NAS100", "AAPL", "ETHUSD"):
+        sig = parse_signal(f"Sell {name}\nSL 86.52\nTP 83.87")
+        assert sig and sig.symbol == name, (name, sig)
+    assert parse_signal("BUY EUR/USD\nSL 1.12\nTP 1.14").symbol == "EURUSD"
+    assert symbol_of("hold buys as price rises") is None
+    db = DB(os.path.join(tempfile.mkdtemp(), "t.db"))
+    route = make_route(db)
+    bot = FakeBot()
+    class Prices:
+        requests = []
+        async def get(self, symbol, direction):
+            self.requests.append(symbol)
+            return {"USOIL": Decimal("85.31"), "XAUUSD": Decimal("3954.60")}[symbol]
+    prices = Prices()
+    handler = Source2(bot, db, prices, FakeTranslator(), datetime.now)
+    async def run():
+        await handler.handle(route, Msg(1, "Buy XAUUSD\nSL 3940\nTP 4000"))
+        await handler.handle(route, Msg(2, "Sell USOIL\nSL 86.52\nTP 83.87", 1))
+        await handler.handle(route, Msg(3, "Close off profits on USOIL", 1))  # wrong parent must not close GOLD
+        assert db.s2_by_src(route["id"], 1)["status"] == "open"
+        await handler.handle(route, Msg(4, "Close off profits on USOIL"))
+    asyncio.run(run())
+    assert bot.sent[1][2].startswith("#USOIL SHORT\n\nВход 85.31\n\nSL: 86.52\n\nTakeprofit: 83.87")
+    assert prices.requests == ["XAUUSD", "USOIL", "USOIL"], prices.requests
+    assert db.s2_by_src(route["id"], 2)["symbol"] == "USOIL"
+    assert db.s2_by_src(route["id"], 2)["status"] == "profit"
+
+
+def test_quote_scale_guard():
+    db = DB(os.path.join(tempfile.mkdtemp(), "t.db"))
+    route = make_route(db)
+    bot = FakeBot()
+    handler = Source2(bot, db, FakePrices(), FakeTranslator(), datetime.now)
+    asyncio.run(handler.handle(route, Msg(1, "Sell USOIL\nSL 86.52\nTP 83.87")))
+    assert "#USOIL SHORT\n\nВход по рынку" in bot.sent[0][2]
+    assert "4031" not in bot.sent[0][2]
+    assert db.s2_by_src(route["id"], 1)["entry"] is None
 
 
 def test_no_price():

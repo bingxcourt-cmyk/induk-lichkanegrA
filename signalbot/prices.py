@@ -248,12 +248,15 @@ class TwelveDataPrices:
         log.info("цена берётся у Twelve Data, не у FxPro")
 
     async def get(self, symbol: str, direction: str) -> Decimal:
-        if not pair_ok(symbol):
-            raise PriceUnavailable(f"котировка {symbol} не настроена")
+        provider_symbol = {"USOIL": "WTI/USD"}.get(symbol.upper())
+        if provider_symbol is None and pair_ok(symbol):
+            provider_symbol = f"{symbol[:3]}/{symbol[3:]}".upper()
+        if provider_symbol is None:
+            raise PriceUnavailable(f"котировка {symbol} не настроена у Twelve Data")
         try:
             async with aiohttp.ClientSession(headers=self.headers,
                                              timeout=aiohttp.ClientTimeout(total=15)) as http:
-                async with http.get(self.URL, params={"symbol": f"{symbol[:3]}/{symbol[3:]}".upper()}) as r:
+                async with http.get(self.URL, params={"symbol": provider_symbol}) as r:
                     data = await r.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             raise PriceUnavailable(f"Twelve Data: {e!r}")

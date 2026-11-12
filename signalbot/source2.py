@@ -36,6 +36,12 @@ class Source2:
 
     async def _post_signal(self, route, src_id, symbol, direction, sl: Decimal, tp, reply_to=None):
         entry = await self._price(symbol, direction)
+        if entry is not None and (not entry.is_finite() or entry <= 0 or sl <= 0
+                                  or max(entry, sl) / min(entry, sl) > 10):
+            log.error("котировка %s не соответствует масштабу уровней сигнала: %s / %s", symbol, entry, sl)
+            if self.admin_id:
+                await self.bot.send(self.admin_id, f"⚠️ {symbol}: цена не соответствует уровням сигнала. Вход опубликован без цены.")
+            entry = None
         text = format_signal(direction, symbol, entry, sl, tp, route["header"])
         dst = await self.bot.send(route["target"], text, reply_to=reply_to, html=True)
         sid = self.db.s2_add(route["id"], src_id, route["target"], dst, direction, symbol, entry, sl, tp,
@@ -64,6 +70,15 @@ class Source2:
     async def handle(self, route, msg):
         text = msg.message or ""
         row = self._thread(route, msg)
+        sig = parse_signal(text)
+        # A different instrument in a reply is an independent signal, not a re-entry in GOLD.
+        if sig and row is not None and sig.symbol != row["symbol"]:
+            if not self.db.s2_by_src(route["id"], msg.id):
+                await self._post_signal(route, msg.id, sig.symbol, sig.direction, sig.sl, sig.tp)
+            return
+        explicit_symbol = symbol_of(text)
+        if row is not None and explicit_symbol and explicit_symbol != row["symbol"] and not sig:
+            return  # never close/move a gold position using an oil update
         if row is not None:
             self.db.s2_link(route["id"], msg.id, row["id"])  # чтобы ответы на этот реплай тоже нашли сигнал
         if getattr(msg, "media", None) and not (row is None and parse_signal(text)):
@@ -90,7 +105,7 @@ class Source2:
             kind = classify_reply(text)
             if kind is None:
                 return
-            sig = parse_signal(text)
+            sig = parse_signal(text, default_symbol=row["symbol"])
             if kind[0] == "other" and sig and sig.symbol == row["symbol"]:
                 kind = ("reentry", sig.direction, sig.sl, sig.tp)  # новый сигнал в ветке старого
         await self._apply(route, msg, row, kind, text)
